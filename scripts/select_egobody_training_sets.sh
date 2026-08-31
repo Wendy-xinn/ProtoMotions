@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+PYTHON_BIN="${PYTHON_BIN:-$REPO_ROOT/IsaacLab/.venv/bin/python}"
+EGOBODY_ROOT="${EGOBODY_ROOT:-/home/wenxin/projects/egobody}"
+BODY_TEXT_ROOT="${EGOBODY_BODY_TEXT_ROOT:-/home/wenxin/projects/texts/body_texts/EgoBody}"
+DATA_ROOT="${EGOBODY_SELECTION_ROOT:-$REPO_ROOT/data/motion_for_trackers/egobody_smpl_ego_v1}"
+
+common_args=(
+    --egobody-root "$EGOBODY_ROOT"
+    --body-text-root "$BODY_TEXT_ROOT"
+    --frames 192
+    --score-stride 8
+    --minimum-motion-score 0.5
+)
+
+mkdir -p "$DATA_ROOT/sft_1000_192" "$DATA_ROOT/sft_diverse_800_192"
+cd "$REPO_ROOT"
+
+"$PYTHON_BIN" data/scripts/select_egobody_sft_clips.py \
+    "${common_args[@]}" \
+    --output "$DATA_ROOT/sft_1000_192/manifest.json" \
+    --candidate-stride 64 \
+    --split-clip-counts 800 100 100 \
+    --min-start-gap 64
+
+"$PYTHON_BIN" data/scripts/select_egobody_sft_clips.py \
+    "${common_args[@]}" \
+    --output "$DATA_ROOT/sft_diverse_800_192/manifest.json" \
+    --candidate-stride 48 \
+    --split-clip-counts 650 75 75 \
+    --min-start-gap 96
+
+echo "Generated EgoBody dense-1000 and diverse-core-800 selections under $DATA_ROOT"

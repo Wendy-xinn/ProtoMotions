@@ -14,16 +14,9 @@ mkdir -p "$DATASET_ROOT"
 cd "$REPO_ROOT"
 
 if [[ ! -f "$MANIFEST" ]]; then
-    "$PYTHON_BIN" data/scripts/select_egobody_sft_clips.py \
-        --egobody-root "$EGOBODY_ROOT" \
-        --body-text-root "$BODY_TEXT_ROOT" \
-        --output "$MANIFEST" \
-        --frames 192 \
-        --candidate-stride 64 \
-        --score-stride 8 \
-        --split-clip-counts 800 100 100 \
-        --min-start-gap 64 \
-        --minimum-motion-score 0.5
+    EGOBODY_ROOT="$EGOBODY_ROOT" \
+    EGOBODY_BODY_TEXT_ROOT="$BODY_TEXT_ROOT" \
+        "$REPO_ROOT/scripts/select_egobody_training_sets.sh"
 fi
 
 if [[ ! -f "$PREPARED_MANIFEST" ]]; then

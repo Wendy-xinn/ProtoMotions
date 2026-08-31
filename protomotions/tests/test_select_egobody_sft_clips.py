@@ -88,3 +88,28 @@ def test_body_text_length_mismatch_is_explicitly_recording_level(tmp_path):
 
     assert timeline == ["a", "b"]
     assert exact is False
+
+
+def test_text_and_displacement_assign_a_coarse_action_type(tmp_path):
+    selector = _load_selector()
+    text_dir = tmp_path / "recording" / "body_idx_0"
+    text_dir.mkdir(parents=True)
+    description = "Both arms are raised above the shoulders."
+    (text_dir / "000.json").write_text(
+        json.dumps({str(index): description for index in range(5)})
+    )
+    info = {"body_idx_fpv": "0 female", "start_frame": "10", "end_frame": "14"}
+    candidates = [
+        {
+            "start": 10,
+            "count": 5,
+            "root_span_m": 1.0,
+        }
+    ]
+
+    selector.attach_text_features(candidates, tmp_path, "recording", info)
+
+    assert candidates[0]["text_tags"] == ["arms_raised"]
+    assert candidates[0]["motion_tags"] == ["locomotion"]
+    assert candidates[0]["action_type"] == "locomotion_with_upper_body"
+    assert candidates[0]["pose_motion_signature"] == "locomotion+arms_raised"

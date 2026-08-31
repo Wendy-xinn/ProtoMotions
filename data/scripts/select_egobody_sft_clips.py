@@ -228,7 +228,9 @@ def attach_text_features(
             timeline[local_start:local_end] if exact_alignment else timeline
         )
         if exact_alignment and len(descriptions) != candidate["count"]:
-            raise ValueError(f"Incomplete body text for {recording} at {candidate['start']}")
+            raise ValueError(
+                f"Incomplete body text for {recording} at {candidate['start']}"
+            )
         candidate["body_text_source"] = f"EgoBody/{recording}/{body_name}"
         candidate["body_text_alignment"] = (
             "exact_frame_window" if exact_alignment else "recording_level_only"
@@ -245,6 +247,33 @@ def attach_text_features(
         candidate["selection_tags"] = sorted(
             set(candidate["text_tags"] + dynamic_tags)
         )
+        text_tags = set(candidate["text_tags"])
+        upper_body = bool(
+            text_tags & {"arms_raised", "horizontal_limb", "hands_close"}
+        )
+        motion_tag = dynamic_tags[0]
+        if motion_tag == "locomotion":
+            action_type = (
+                "locomotion_with_upper_body" if upper_body else "locomotion"
+            )
+        elif motion_tag == "short_translation":
+            action_type = (
+                "short_translation_with_upper_body"
+                if upper_body
+                else "short_translation"
+            )
+        elif "deep_knee_bend" in text_tags:
+            action_type = "in_place_lower_body"
+        elif "torso_lean" in text_tags:
+            action_type = "in_place_leaning"
+        elif upper_body:
+            action_type = "in_place_upper_body"
+        else:
+            action_type = "in_place_general"
+        candidate["action_type"] = action_type
+        candidate["pose_motion_signature"] = "+".join(
+            [motion_tag, *sorted(text_tags)]
+        )
 
 
 def assign_diversity_scores(candidates_by_recording: dict[str, list[dict]]) -> None:
@@ -252,13 +281,20 @@ def assign_diversity_scores(candidates_by_recording: dict[str, list[dict]]) -> N
     tag_counts = Counter(
         tag for candidate in candidates for tag in candidate.get("selection_tags", [])
     )
+    action_counts = Counter(
+        candidate.get("action_type", "unannotated") for candidate in candidates
+    )
     total = max(len(candidates), 1)
     for candidate in candidates:
         rarity = sum(
             math.log1p(total / tag_counts[tag])
             for tag in candidate.get("selection_tags", [])
         )
-        candidate["diversity_score"] = candidate["motion_score"] + 0.15 * rarity
+        action_type = candidate.get("action_type", "unannotated")
+        action_rarity = math.log1p(total / action_counts[action_type])
+        candidate["diversity_score"] = (
+            candidate["motion_score"] + 0.15 * rarity + 0.25 * action_rarity
+        )
 
 
 def write_text_selection_records(output: Path, clips: list[dict]) -> None:
@@ -283,6 +319,8 @@ def write_text_selection_records(output: Path, clips: list[dict]) -> None:
                 "root_span_m": clip["root_span_m"],
                 "mean_sampled_pose_delta": clip["mean_sampled_pose_delta"],
                 "motion_tags": clip["motion_tags"],
+                "action_type": clip["action_type"],
+                "pose_motion_signature": clip["pose_motion_signature"],
                 "text_tags": clip["text_tags"],
                 "text_change_score": clip["text_change_score"],
                 "representative_descriptions": clip["representative_descriptions"],
@@ -299,6 +337,10 @@ def write_text_selection_records(output: Path, clips: list[dict]) -> None:
         for split in ("train", "val", "test")
     }
     alignment_counts = Counter(clip["body_text_alignment"] for clip in annotated)
+    action_counts = Counter(clip["action_type"] for clip in annotated)
+    signature_counts = Counter(
+        clip["pose_motion_signature"] for clip in annotated
+    )
     report_path = output.with_name("SELECTION_REPORT.md")
     lines = [
         "# EgoBody Diverse Motion Selection",
@@ -314,6 +356,8 @@ def write_text_selection_records(output: Path, clips: list[dict]) -> None:
         f"- Split clips: {dict(split_counts)}",
         f"- Split recordings: {recording_counts}",
         f"- Body-text alignment: {dict(alignment_counts)}",
+        f"- Coarse action types: {len(action_counts)}",
+        f"- Pose-motion signatures: {len(signature_counts)}",
         f"- Motion-score range: {scores.min():.4f}--{scores.max():.4f}",
         f"- Motion-score median: {np.median(scores):.4f}",
         "- Split isolation: official EgoBody recording-level train/val/test split",
@@ -330,6 +374,22 @@ def write_text_selection_records(output: Path, clips: list[dict]) -> None:
         "|---|---:|",
     ]
     lines.extend(f"| {tag} | {count} |" for tag, count in tag_counts.most_common())
+    lines.extend(
+        [
+            "",
+            "## Coarse Action Types",
+            "",
+            "These are pose-motion categories inferred from displacement and body",
+            "descriptions, not object-action labels supplied by EgoBody.",
+            "",
+            "| action type | clips |",
+            "|---|---:|",
+        ]
+    )
+    lines.extend(
+        f"| {action_type} | {count} |"
+        for action_type, count in action_counts.most_common()
+    )
     lines.extend(
         [
             "",

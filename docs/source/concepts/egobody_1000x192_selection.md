@@ -11,15 +11,30 @@ The official recording-level train, validation, and test partition is retained
 to prevent the same room reconstruction, subject trajectory, or interaction
 recording from leaking across splits.
 
-## Current selection
+## Current selections
+
+### Diverse core (recommended)
+
+- 800 clips: 650 train, 75 validation, and 75 test.
+- Selected starts from one recording are at least 96 frames apart, limiting
+  temporal overlap to 50%.
+- 8 coarse pose-motion action types and 91 pose-motion signatures.
+- 210 locomotion, 347 short-translation, and 243 in-place-motion clips.
+- 723 clip records have exact frame-level text alignment; 77 are explicitly
+  recording-level only.
+
+Use `sft_diverse_800_192` for the first GPC and MaskedMimic comparison.
+
+### Dense expansion
 
 - 1000 clips, each containing 192 frames.
 - 800 train clips from 59 recordings.
 - 100 validation clips from 15 recordings.
 - 100 test clips from 39 recordings.
 - 192,000 selected frames in total.
-- Minimum motion score 0.5; selected median 2.6807.
-- 281 locomotion, 478 short-translation, and 241 in-place-motion clips.
+- Minimum motion score 0.5; selected median 2.6612.
+- 285 locomotion, 460 short-translation, and 255 in-place-motion clips.
+- 8 coarse pose-motion action types and 91 pose-motion signatures.
 
 The motion score combines root travel, root span, and sampled SMPL pose change.
 It rejects static windows rather than accepting an entire recording. Ranking
@@ -44,7 +59,8 @@ The generated dataset directory is
 - `SELECTION_REPORT.md`: human-readable counts and tag coverage.
 
 Regenerate the selection and both training packs with
-`scripts/prepare_egobody_1000x192.sh`. Set `EGOBODY_ROOT` and
+`scripts/prepare_egobody_1000x192.sh`. Generate both dense and diverse-core
+manifests with `scripts/select_egobody_training_sets.sh`. Set `EGOBODY_ROOT` and
 `EGOBODY_BODY_TEXT_ROOT` when using a different machine.
 
 ## Scope
