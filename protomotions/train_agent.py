@@ -290,6 +290,21 @@ def create_parser():
         ),
     )
     parser.add_argument(
+        "--resume-motion-file",
+        default=None,
+        help="Replace only the MotionLib input while resuming model/optimizer state.",
+    )
+    parser.add_argument(
+        "--resume-scenes-file",
+        default=None,
+        help="Replace only the paired SceneLib input while resuming.",
+    )
+    parser.add_argument(
+        "--resume-ego-camera-file",
+        default=None,
+        help="Replace the ego-camera trajectory observation while resuming.",
+    )
+    parser.add_argument(
         "--overrides",
         nargs="*",
         default=[],
@@ -634,6 +649,16 @@ def main():
     global parser, args
     torch.set_float32_matmul_precision("high")
 
+    requested_resume_inputs = {
+        "resume_offline_num_epochs": getattr(args, "resume_offline_num_epochs", None),
+        "resume_training_max_iterations": getattr(
+            args, "resume_training_max_iterations", None
+        ),
+        "resume_motion_file": getattr(args, "resume_motion_file", None),
+        "resume_scenes_file": getattr(args, "resume_scenes_file", None),
+        "resume_ego_camera_file": getattr(args, "resume_ego_camera_file", None),
+    }
+
     # ===================================================================
     # 1. Setup: Detect Checkpoint Mode
     # ===================================================================
@@ -647,6 +672,10 @@ def main():
         mode, checkpoint_path, wandb_id = "fresh", None, None
     else:
         mode, checkpoint_path, wandb_id = detect_checkpoint_mode(args, save_dir)
+    if mode == "resume":
+        for key, value in requested_resume_inputs.items():
+            if value is not None:
+                setattr(args, key, value)
 
     # ===================================================================
     # 2. Load Configs Based on Mode
@@ -675,6 +704,35 @@ def main():
         motion_lib_config = resolved_configs["motion_lib"]
         env_config = resolved_configs["env"]
         agent_config = resolved_configs["agent"]
+        resume_motion_file = getattr(args, "resume_motion_file", None)
+        resume_scenes_file = getattr(args, "resume_scenes_file", None)
+        resume_ego_camera_file = getattr(args, "resume_ego_camera_file", None)
+        if resume_motion_file is not None:
+            motion_lib_config.motion_file = resume_motion_file
+            log.info("RESUME: replacing MotionLib input with %s", resume_motion_file)
+        if resume_scenes_file is not None:
+            scene_lib_config.scene_file = resume_scenes_file
+            log.info("RESUME: replacing SceneLib input with %s", resume_scenes_file)
+        if resume_ego_camera_file is not None:
+            from protomotions.envs.component_factories import (
+                load_ego_camera_trajectory_params,
+            )
+
+            component = env_config.observation_components.get(
+                "ego_visible_scene_pointcloud"
+            )
+            if component is None:
+                raise ValueError(
+                    "--resume-ego-camera-file requires the "
+                    "ego_visible_scene_pointcloud observation"
+                )
+            component.static_params.update(
+                load_ego_camera_trajectory_params(resume_ego_camera_file)
+            )
+            log.info(
+                "RESUME: replacing ego-camera trajectory with %s",
+                resume_ego_camera_file,
+            )
         motion_lib_config.validate()
 
         resume_offline_num_epochs = getattr(args, "resume_offline_num_epochs", None)

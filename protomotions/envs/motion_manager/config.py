@@ -76,3 +76,20 @@ class MimicMotionManagerConfig(MotionManagerConfig):
         default=True,
         metadata={"help": "Whether to resample motion on environment reset."}
     )
+
+
+@dataclass
+class SceneWindowMotionManagerConfig(MimicMotionManagerConfig):
+    """Scene-matched shuffled fixed-transition sampling for online clip SFT."""
+
+    _target_: str = (
+        "protomotions.envs.motion_manager.scene_window_motion_manager."
+        "SceneWindowMotionManager"
+    )
+    motion_scene_ids: List[str] = field(default_factory=list)
+    # Kept as ``frames`` in the CLI for compatibility, but this is the number
+    # of simulator transitions. A 32-step window consumes 33 reference poses.
+    window_size_frames: int = 32
+    fixed_window_stride_frames: int = 32
+    random_windows_per_clip: int = 1
+    sampler_seed: int = 0

@@ -231,6 +231,7 @@ def test_trajectory_scene_cross_attention_has_finite_gradients():
         model_dim=32,
         num_attention_heads=4,
         feedforward_dim=64,
+        use_scene_history_token=True,
     )
     points = torch.randn(batch, point_count, 10)
     points[..., -1] = 1
@@ -252,6 +253,23 @@ def test_trajectory_scene_cross_attention_has_finite_gradients():
         for parameter in model.parameters()
         if parameter.requires_grad
     )
+
+
+def test_scene_history_features_summarize_current_and_remembered_points():
+    points = torch.zeros(1, 4, 10)
+    points[0, :2, :3] = torch.tensor([[1.0, 0.0, 0.0], [3.0, 0.0, 0.0]])
+    points[0, :2, 6] = 1.0
+    points[0, 0, 7] = 1.0
+    points[0, 1, 8] = 0.5
+    points[0, :2, 9] = 1.0
+    valid = points[..., 9] > 0.5
+
+    features = TrajectorySceneCrossAttentionEncoder._scene_history_features(
+        points, valid
+    )
+    assert features.shape == (1, 16)
+    torch.testing.assert_close(features[0, :6], torch.tensor([0.5, 0.5, 0.5, 1.0, 0.25, 0.5]))
+    torch.testing.assert_close(features[0, 6:9], torch.tensor([2.0, 0.0, 0.0]))
 
 
 def _trajectory_inputs(batch=2, point_count=12, steps=8):

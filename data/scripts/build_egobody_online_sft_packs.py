@@ -21,7 +21,47 @@ MOTION_FIELDS = (
     "motion_dt",
     "motion_weights",
 )
-OPTIONAL_MOTION_FIELDS = ("retarget_root_height_offsets_m",)
+OPTIONAL_MOTION_FIELDS = (
+    "retarget_root_height_offsets_m",
+    "retarget_unlabelled_support_fallback_mask",
+)
+RECORDING_LOCAL_METADATA = {
+    "retarget_unlabelled_support_fallback_motion_ids",
+    "retarget_unlabelled_support_fallback",
+}
+SOMA23_NUM_BODIES = 23
+SOMA23_NUM_DOFS = 66
+
+
+def _validate_soma23_motion(payload: dict, source: Path) -> None:
+    """Reject an accidentally supplied SMPL package before merging GPC data."""
+    required_shapes = {
+        "gts": (SOMA23_NUM_BODIES, 3),
+        "grs": (SOMA23_NUM_BODIES, 4),
+        "gvs": (SOMA23_NUM_BODIES, 3),
+        "gavs": (SOMA23_NUM_BODIES, 3),
+        "lrs": (SOMA23_NUM_BODIES, 4),
+        "contacts": (SOMA23_NUM_BODIES,),
+        "dps": (SOMA23_NUM_DOFS,),
+        "dvs": (SOMA23_NUM_DOFS,),
+    }
+    frame_count = None
+    for key, trailing_shape in required_shapes.items():
+        value = payload.get(key)
+        if not isinstance(value, torch.Tensor) or tuple(value.shape[1:]) != trailing_shape:
+            actual = None if value is None else tuple(value.shape)
+            raise ValueError(
+                f"{source} is not a SOMA23 MotionLib: {key} shape {actual}, "
+                f"expected [frames, {', '.join(map(str, trailing_shape))}]"
+            )
+        if frame_count is None:
+            frame_count = value.shape[0]
+        elif value.shape[0] != frame_count:
+            raise ValueError(f"Inconsistent frame fields in {source}")
+        if value.is_floating_point() and not torch.isfinite(value).all():
+            raise ValueError(f"Non-finite values in {source}:{key}")
+    if int(payload["motion_num_frames"].sum()) != frame_count:
+        raise ValueError(f"Motion counts do not cover all frames in {source}")
 
 
 def _atomic_torch_save(payload, output_path: Path) -> None:
@@ -74,6 +114,18 @@ def _merge_split(
             map_location="cpu",
             weights_only=False,
         )
+        if "retarget_unlabelled_support_fallback_mask" not in motion_payload:
+            fallback_mask = torch.zeros(
+                len(motion_payload["motion_num_frames"]), dtype=torch.bool
+            )
+            fallback_ids = motion_payload.get(
+                "retarget_unlabelled_support_fallback_motion_ids"
+            )
+            if fallback_ids is not None:
+                fallback_mask[fallback_ids] = True
+            motion_payload["retarget_unlabelled_support_fallback_mask"] = fallback_mask
+        if "soma23" in motion_filename.lower():
+            _validate_soma23_motion(motion_payload, recording_dir / motion_filename)
         scene_payload = torch.load(
             recording_dir / "scene_lib_training_isaaclab.pt",
             map_location="cpu",
@@ -84,7 +136,9 @@ def _merge_split(
             map_location="cpu",
             weights_only=False,
         )
-        recording_clips = sorted(recording_clips, key=lambda item: item["clip_id"])
+        recording_clips = sorted(
+            recording_clips, key=lambda item: (item["start"], item["clip_id"])
+        )
         local_count = len(recording_clips)
         if int(motion_payload["motion_num_frames"].shape[0]) != local_count:
             raise ValueError(f"Motion count mismatch for {recording}")
@@ -115,6 +169,7 @@ def _merge_split(
                 | set(MOTION_FIELDS)
                 | set(OPTIONAL_MOTION_FIELDS)
                 | {"length_starts", "motion_files"}
+                | RECORDING_LOCAL_METADATA
             }
 
         source_scene = scene_payload["original_scenes"][0]
@@ -176,7 +231,7 @@ def _merge_split(
     )
     _atomic_torch_save(
         {
-            "recording": f"egobody_online_sft_50_{split}",
+            "recording": f"egobody_online_{split}",
             "coordinate_system": "motion_world",
             "source": str(Path(manifest["prepared_root"])),
             "motions": camera_motions,

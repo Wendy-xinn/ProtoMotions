@@ -189,10 +189,19 @@ def test_train_agent_parser_and_bool_helpers(monkeypatch, tmp_path):
             "30",
             "--resume-training-max-iterations",
             "50",
+            "--resume-motion-file",
+            "next_motion.pt",
+            "--resume-scenes-file",
+            "next_scenes.pt",
+            "--resume-ego-camera-file",
+            "next_camera.pt",
         ]
     )
     assert parsed.training_max_iterations == 30
     assert parsed.resume_training_max_iterations == 50
+    assert parsed.resume_motion_file == "next_motion.pt"
+    assert parsed.resume_scenes_file == "next_scenes.pt"
+    assert parsed.resume_ego_camera_file == "next_camera.pt"
 
     required_args = [
         "--robot-name",

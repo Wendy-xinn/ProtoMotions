@@ -136,6 +136,7 @@ def align_retargeted_motion(
     clearance_m: float = 0.003,
     support_quantile: float = 0.1,
     enforce_initial_support: bool = True,
+    allow_unlabelled_support_fallback: bool = True,
 ) -> tuple[dict, torch.Tensor]:
     """Apply one contact-aware Z offset to each motion while preserving root motion."""
     if not 0.0 <= support_quantile <= 1.0:
@@ -149,7 +150,12 @@ def align_retargeted_motion(
         )
     source_contacts = source.get("contacts", source.get("rigid_body_contacts"))
     if source_contacts is None:
-        raise ValueError("Source motion has no contact labels")
+        if not allow_unlabelled_support_fallback:
+            raise ValueError("Source motion has no contact labels")
+        source_positions, _, _, _ = _motion_layout(source)
+        source_contacts = torch.zeros(
+            source_positions.shape[:2], dtype=torch.bool, device=source_positions.device
+        )
 
     output = dict(target)
     position_key = "gts" if "gts" in target else "rigid_body_pos"
@@ -162,7 +168,8 @@ def align_retargeted_motion(
             target_pos.shape[:2], dtype=torch.bool, device=target_pos.device
         )
 
-    offsets = []
+    offsets: list[torch.Tensor | None] = []
+    fallback_motion_ids = []
     for motion_index in range(len(source_counts)):
         source_start = int(source_starts[motion_index])
         target_start = int(target_starts[motion_index])
@@ -173,22 +180,26 @@ def align_retargeted_motion(
             source_slice = slice(source_start, source_start + count)
             target_slice = slice(target_start, target_start + count)
             contact = source_contacts[source_slice, source_id].bool()
-            if not contact.any():
-                continue
             target_bottom = box_bottom_height(
                 target_pos[target_slice, target_id],
                 target_rot[target_slice, target_id],
                 target_geometries[target_name],
             )
+            if not contact.any():
+                continue
             support_bottoms.append(target_bottom[contact])
             if bool(contact[0]):
                 initial_support_bottoms.append(target_bottom[0])
             output[contact_key][target_slice, target_id] = contact
         if not support_bottoms:
-            raise ValueError(f"Motion {motion_index} has no support-foot contact samples")
-        support_bottom = torch.quantile(
-            torch.cat(support_bottoms), support_quantile
-        )
+            if not allow_unlabelled_support_fallback:
+                raise ValueError(
+                    f"Motion {motion_index} has no support-foot contact samples"
+                )
+            fallback_motion_ids.append(motion_index)
+            offsets.append(None)
+            continue
+        support_bottom = torch.quantile(torch.cat(support_bottoms), support_quantile)
         offset = clearance_m - support_bottom
         # The quantile is robust over the complete clip, but reset cannot
         # tolerate a penetrating support foot. Enforce clearance only for feet
@@ -201,10 +212,24 @@ def align_retargeted_motion(
                 offset.new_tensor(clearance_m) - initial_support_bottom,
             )
         offset = offset.to(target_pos.dtype)
-        output[position_key][target_start : target_start + count, :, 2] += offset
-        offsets.append(offset.cpu())
+        offsets.append(offset)
 
-    offset_tensor = torch.stack(offsets)
+    labelled_offsets = [offset for offset in offsets if offset is not None]
+    fallback_offset = (
+        torch.stack(labelled_offsets).median()
+        if labelled_offsets
+        else target_pos.new_zeros(())
+    )
+    resolved_offsets = []
+    for motion_index, offset in enumerate(offsets):
+        if offset is None:
+            offset = fallback_offset
+        target_start = int(target_starts[motion_index])
+        count = int(target_counts[motion_index])
+        output[position_key][target_start : target_start + count, :, 2] += offset
+        resolved_offsets.append(offset.cpu())
+
+    offset_tensor = torch.stack(resolved_offsets)
     if "gts" in target:
         output["retarget_root_height_offsets_m"] = offset_tensor
     else:
@@ -216,6 +241,15 @@ def align_retargeted_motion(
     )
     output["retarget_ground_clearance_m"] = float(clearance_m)
     output["retarget_ground_support_quantile"] = float(support_quantile)
+    output["retarget_unlabelled_support_fallback_motion_ids"] = torch.tensor(
+        fallback_motion_ids, dtype=torch.long
+    )
+    fallback_mask = torch.zeros(len(source_counts), dtype=torch.bool)
+    fallback_mask[fallback_motion_ids] = True
+    output["retarget_unlabelled_support_fallback_mask"] = fallback_mask
+    output["retarget_unlabelled_support_fallback"] = (
+        "median_labelled_motion_offset" if labelled_offsets else "zero_offset"
+    )
     return output, offset_tensor
 
 
@@ -245,6 +279,11 @@ def main() -> None:
             "support foot the requested clearance."
         ),
     )
+    parser.add_argument(
+        "--strict-support-contacts",
+        action="store_true",
+        help="Fail instead of using foot geometry when a clip has no contact labels.",
+    )
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
@@ -261,6 +300,7 @@ def main() -> None:
         clearance_m=args.clearance_m,
         support_quantile=args.support_quantile,
         enforce_initial_support=not args.no_initial_support_safeguard,
+        allow_unlabelled_support_fallback=not args.strict_support_contacts,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     temporary = args.output.with_name(f".{args.output.name}.tmp.pt")

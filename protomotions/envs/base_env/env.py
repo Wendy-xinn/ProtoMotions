@@ -1816,6 +1816,11 @@ class BaseEnv:
                     humanoid_motion_ids, dtype=torch.long, device=self.device
                 )
 
+        manager_kwargs = {}
+        if hasattr(self.config.motion_manager, "motion_scene_ids"):
+            manager_kwargs["scene_ids_per_env"] = self.scene_lib.get_scene_ids()
+            fixed_motion_ids = None
+
         self.motion_manager = MotionManagerClass(
             config=self.config.motion_manager,
             num_envs=self.num_envs,
@@ -1823,6 +1828,7 @@ class BaseEnv:
             device=self.device,
             motion_lib=self.motion_lib,
             fixed_motion_ids_per_env=fixed_motion_ids,
+            **manager_kwargs,
         )
 
     def create_visualization_markers(self, headless: bool):

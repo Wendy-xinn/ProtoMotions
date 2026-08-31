@@ -292,6 +292,17 @@ class TrajectorySceneCrossAttentionEncoder(nn.Module):
         self.point_projection = nn.Sequential(
             nn.Linear(config.point_feature_dim, dim), nn.LayerNorm(dim), nn.GELU()
         )
+        self.history_projection = None
+        self.history_type_embedding = None
+        if config.use_scene_history_token:
+            if config.point_feature_dim < 10:
+                raise ValueError(
+                    "Scene history token requires 10-channel point features"
+                )
+            self.history_projection = nn.Sequential(
+                nn.Linear(16, dim), nn.LayerNorm(dim), nn.GELU()
+            )
+            self.history_type_embedding = nn.Parameter(torch.zeros(1, 1, dim))
         self.head_pose_projection = nn.Sequential(
             nn.LazyLinear(dim), nn.LayerNorm(dim), nn.GELU()
         )
@@ -337,6 +348,51 @@ class TrajectorySceneCrossAttentionEncoder(nn.Module):
         weights = valid.to(features.dtype).unsqueeze(-1)
         return (features * weights).sum(1) / weights.sum(1).clamp_min(1.0)
 
+    @staticmethod
+    def _scene_history_features(
+        points: torch.Tensor, valid: torch.Tensor
+    ) -> torch.Tensor:
+        """Summarize the complete causal map in one order-invariant token."""
+        weights = valid.to(points.dtype)
+        count = weights.sum(dim=1, keepdim=True)
+        denominator = count.clamp_min(1.0)
+        xyz = points[..., :3]
+        current = points[..., 7].clamp(0.0, 1.0)
+        age = points[..., 8].clamp(0.0, 1.0)
+        static = points[..., 6].clamp(0.0, 1.0)
+
+        centroid = (xyz * weights.unsqueeze(-1)).sum(1) / denominator
+        centered = xyz - centroid.unsqueeze(1)
+        spread = torch.sqrt(
+            (centered.square() * weights.unsqueeze(-1)).sum(1) / denominator
+            + 1.0e-8
+        )
+        distances = torch.linalg.vector_norm(xyz, dim=-1)
+        nearest = distances.masked_fill(~valid, float("inf")).amin(1, keepdim=True)
+        nearest = torch.where(torch.isfinite(nearest), nearest, torch.zeros_like(nearest))
+        farthest = distances.masked_fill(~valid, 0.0).amax(1, keepdim=True)
+        mean_distance = (distances * weights).sum(1, keepdim=True) / denominator
+        age_mean = (age * weights).sum(1, keepdim=True) / denominator
+        age_max = age.masked_fill(~valid, 0.0).amax(1, keepdim=True)
+
+        return torch.cat(
+            [
+                count / points.shape[1],
+                (current * weights).sum(1, keepdim=True) / denominator,
+                ((1.0 - current) * weights).sum(1, keepdim=True) / denominator,
+                (static * weights).sum(1, keepdim=True) / denominator,
+                age_mean,
+                age_max,
+                centroid,
+                spread,
+                nearest,
+                mean_distance,
+                farthest,
+                (count > 0).to(points.dtype),
+            ],
+            dim=-1,
+        )
+
     def forward(self, tensordict: TensorDict, log_internals: bool = False) -> TensorDict:
         points_flat = tensordict[self.config.point_key]
         batch = points_flat.shape[0]
@@ -344,6 +400,20 @@ class TrajectorySceneCrossAttentionEncoder(nn.Module):
         point_valid = points[..., -1] > 0.5
         point_tokens = self.point_projection(points)
         point_tokens = point_tokens * point_valid.unsqueeze(-1)
+        scene_tokens = point_tokens
+        scene_valid = point_valid
+        history_token = None
+        if self.history_projection is not None:
+            assert self.history_type_embedding is not None
+            history_features = self._scene_history_features(points, point_valid)
+            history_token = (
+                self.history_projection(history_features).unsqueeze(1)
+                + self.history_type_embedding
+            )
+            history_valid = point_valid.any(dim=1, keepdim=True)
+            history_token = history_token * history_valid.unsqueeze(-1)
+            scene_tokens = torch.cat([history_token, point_tokens], dim=1)
+            scene_valid = torch.cat([history_valid, point_valid], dim=1)
 
         head_times = tensordict[self.config.head_time_key]
         steps = head_times.shape[-1]
@@ -364,9 +434,9 @@ class TrajectorySceneCrossAttentionEncoder(nn.Module):
         )
         attended_scene, _ = self.scene_attention(
             query=head_tokens,
-            key=point_tokens,
-            value=point_tokens,
-            key_padding_mask=self._safe_padding_mask(point_valid),
+            key=scene_tokens,
+            value=scene_tokens,
+            key_padding_mask=self._safe_padding_mask(scene_valid),
             need_weights=False,
         )
         trajectory_latent = self._masked_mean(head_tokens, head_valid)
@@ -375,7 +445,7 @@ class TrajectorySceneCrossAttentionEncoder(nn.Module):
         # trajectory.  Use a permutation-invariant point summary instead.  The
         # zero-valued links keep every branch in the autograd graph so these
         # controlled ablations also work under DDP without unused parameters.
-        independent_scene_latent = self._masked_mean(point_tokens, point_valid)
+        independent_scene_latent = self._masked_mean(scene_tokens, scene_valid)
         mode = self.config.condition_mode
         if mode == "full":
             scene_latent = attended_scene_latent
@@ -408,6 +478,8 @@ class TrajectorySceneCrossAttentionEncoder(nn.Module):
         tensordict[self.out_keys[0]] = output
         if log_internals:
             tensordict["ego_head_trajectory_latent"] = trajectory_latent
+            if history_token is not None:
+                tensordict["ego_scene_history_token"] = history_token.squeeze(1)
             tensordict["scene_memory_latent"] = scene_latent
         return tensordict
 

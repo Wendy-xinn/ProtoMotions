@@ -10,9 +10,13 @@ import torch
 from protomotions.envs.motion_manager.config import (
     MimicMotionManagerConfig,
     MotionManagerConfig,
+    SceneWindowMotionManagerConfig,
 )
 from protomotions.envs.motion_manager.mimic_motion_manager import MimicMotionManager
 from protomotions.envs.motion_manager.motion_manager import MotionManager
+from protomotions.envs.motion_manager.scene_window_motion_manager import (
+    SceneWindowMotionManager,
+)
 
 
 class _MotionLib:
@@ -23,6 +27,15 @@ class _MotionLib:
 
     def num_motions(self):
         return len(self.motion_weights)
+
+
+class _WindowMotionLib(_MotionLib):
+    def __init__(self):
+        super().__init__()
+        self.motion_weights = torch.ones(4)
+        self.motion_num_frames = torch.full((4,), 192, dtype=torch.long)
+        self.motion_dt = torch.full((4,), 1.0 / 30.0)
+        self.motion_lengths = (self.motion_num_frames - 1) * self.motion_dt
 
 
 def _manager(
@@ -40,6 +53,74 @@ def _manager(
         motion_lib=_MotionLib(),
         fixed_motion_ids_per_env=fixed_motion_ids_per_env,
     )
+
+
+def _window_manager(random_windows_per_clip: int = 1):
+    return SceneWindowMotionManager(
+        SceneWindowMotionManagerConfig(
+            init_start_prob=0.0,
+            motion_scene_ids=["a", "a", "b", "b"],
+            window_size_frames=32,
+            fixed_window_stride_frames=32,
+            random_windows_per_clip=random_windows_per_clip,
+            sampler_seed=7,
+        ),
+        num_envs=2,
+        env_dt=1.0 / 30.0,
+        device=torch.device("cpu"),
+        motion_lib=_WindowMotionLib(),
+        scene_ids_per_env=["a", "b"],
+    )
+
+
+def test_scene_window_manager_never_crosses_physical_scene_pools():
+    manager = _window_manager()
+    for _ in range(20):
+        manager.sample_motions(torch.tensor([0, 1]))
+        assert int(manager.motion_ids[0]) in {0, 1}
+        assert int(manager.motion_ids[1]) in {2, 3}
+
+
+def test_scene_window_manager_fixed_queue_covers_every_motion_transition():
+    manager = _window_manager(random_windows_per_clip=0)
+    starts_by_motion = {0: set(), 1: set()}
+    for _ in range(12):
+        manager.sample_motions(torch.tensor([0]))
+        motion_id = int(manager.motion_ids[0])
+        start = round(float(manager.motion_times[0]) * 30)
+        starts_by_motion[motion_id].add(start)
+    expected = {0, 32, 64, 96, 128, 159}
+    assert starts_by_motion == {0: expected, 1: expected}
+
+    covered = set()
+    for start in expected:
+        covered.update(range(start, min(start + 32, 191)))
+    assert covered == set(range(191))
+
+
+def test_scene_window_manager_ends_at_window_boundary_and_resamples():
+    manager = _window_manager(random_windows_per_clip=0)
+    manager.sample_motions(torch.tensor([0]))
+    first = (int(manager.motion_ids[0]), float(manager.motion_times[0]))
+    manager.motion_times[0] = manager.window_end_times[0] - manager.env_dt
+    assert not manager.get_done_tracks(torch.tensor([0])).item()
+    manager.post_physics_step()
+    assert manager.get_done_tracks(torch.tensor([0])).item()
+    manager.sample_motions(torch.tensor([0]))
+    second = (int(manager.motion_ids[0]), float(manager.motion_times[0]))
+    assert second != first
+
+
+def test_scene_window_manager_builds_scene_matched_eval_batches():
+    manager = _window_manager()
+    batches = manager.build_scene_matched_eval_batches()
+
+    pairs = []
+    for env_ids, motion_ids in batches:
+        for env_id, motion_id in zip(env_ids.tolist(), motion_ids.tolist()):
+            pairs.append((env_id, motion_id))
+            assert manager.scene_ids_per_env[env_id] == manager.config.motion_scene_ids[motion_id]
+    assert sorted(motion_id for _, motion_id in pairs) == [0, 1, 2, 3]
 
 
 def test_motion_subset_methods_select_expected_available_ids():

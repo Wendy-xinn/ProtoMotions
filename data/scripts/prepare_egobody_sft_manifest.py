@@ -44,6 +44,23 @@ def run(command: list[str], *, env: dict[str, str]) -> None:
     subprocess.run(command, cwd=PROJECT_ROOT, env=env, check=True)
 
 
+def base_recording_is_complete(
+    output_dir: Path, starts: list[str], frame_count: int
+) -> bool:
+    required = [
+        output_dir / "ego_camera.pt",
+        output_dir / "scene_lib_training.pt",
+        output_dir / "motion_lib.yaml",
+    ]
+    required.extend(
+        output_dir
+        / "motions"
+        / f"frame_{int(start):05d}_count_{frame_count:04d}.motion"
+        for start in starts
+    )
+    return all(path.is_file() for path in required)
+
+
 def main() -> None:
     args = parse_args()
     manifest_path = args.manifest.resolve()
@@ -77,9 +94,12 @@ def main() -> None:
         grounded_pack = output_dir / "motion_lib_soma23_grounded.pt"
         grounded_camera = output_dir / "ego_camera_grounded.pt"
         scene_usd = output_dir / "scene_lib_training_isaaclab.pt"
-        overwrite = ["--overwrite"] if args.overwrite else []
-
-        if args.overwrite or not (output_dir / "ego_camera.pt").is_file():
+        base_complete = base_recording_is_complete(
+            output_dir, starts, manifest["frame_count"]
+        )
+        rebuild_recording = args.overwrite or not base_complete
+        overwrite = ["--overwrite"] if rebuild_recording else []
+        if rebuild_recording:
             run(
                 [
                     python,
@@ -99,7 +119,7 @@ def main() -> None:
                 env=env,
             )
 
-        if args.overwrite or not smpl_pack.is_file():
+        if rebuild_recording or not smpl_pack.is_file():
             run(
                 [
                     python,
@@ -114,7 +134,7 @@ def main() -> None:
                 env=env,
             )
 
-        if args.overwrite or not soma_pack.is_file():
+        if rebuild_recording or not soma_pack.is_file():
             run(
                 [
                     python,
@@ -130,7 +150,7 @@ def main() -> None:
                 env=env,
             )
 
-        if args.overwrite or not grounded_pack.is_file():
+        if rebuild_recording or not grounded_pack.is_file():
             run(
                 [
                     python,
@@ -143,7 +163,7 @@ def main() -> None:
                 env=env,
             )
 
-        if args.overwrite or not grounded_camera.is_file():
+        if rebuild_recording or not grounded_camera.is_file():
             run(
                 [
                     python,
@@ -156,7 +176,7 @@ def main() -> None:
                 env=env,
             )
 
-        if not args.skip_usd and (args.overwrite or not scene_usd.is_file()):
+        if not args.skip_usd and (rebuild_recording or not scene_usd.is_file()):
             run(
                 [
                     str(PROJECT_ROOT / "scripts/run_wsl_isaaclab.sh"),

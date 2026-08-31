@@ -963,6 +963,7 @@ class Scene:
     humanoid_motion_id: int = (
         -1
     )  # specific human motion to use for this scene, -1 means None
+    scene_id: Optional[str] = None
 
     def add_object(self, scene_object: SceneObject):
         """Add an object to the scene."""
@@ -1046,6 +1047,12 @@ class SceneLibConfig:
         default=ReplicationMethod.WEIGHTED,
         metadata={
             "help": "Method for replicating scenes: 'first', 'weighted', 'random', 'sequential'."
+        },
+    )
+    replication_weights: Optional[List[float]] = field(
+        default=None,
+        metadata={
+            "help": "Optional per-original-scene weights used for weighted replication."
         },
     )
     pointcloud_samples_per_object: Optional[int] = field(
@@ -1413,6 +1420,10 @@ class SceneLib:
         if all(mid == -1 for mid in humanoid_motion_ids):
             return None
         return humanoid_motion_ids
+
+    def get_scene_ids(self) -> List[Optional[str]]:
+        """Return the physical scene label assigned to every environment."""
+        return [scene.scene_id for scene in self.scenes]
 
     def get_per_env_humanoid_motion_ids_tensor(self) -> torch.Tensor:
         """Return (num_envs,) int tensor of humanoid_motion_id per replicated scene.
@@ -2570,6 +2581,7 @@ class SceneLib:
             scene_data = {
                 "offset": scene.offset,
                 "humanoid_motion_id": scene.humanoid_motion_id,
+                "scene_id": scene.scene_id,
                 "objects": [],
             }
             for obj in scene.objects:
@@ -2674,6 +2686,7 @@ class SceneLib:
                 objects=objects,
                 offset=scene_data["offset"],
                 humanoid_motion_id=scene_data["humanoid_motion_id"],
+                scene_id=scene_data.get("scene_id"),
             )
             scenes.append(scene)
 

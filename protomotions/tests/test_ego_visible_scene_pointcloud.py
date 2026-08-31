@@ -1,4 +1,5 @@
 import torch
+import pytest
 
 from protomotions.envs.obs.ego_visible_scene_pointcloud import (
     compute_ego_visible_scene_pointcloud_obs,
@@ -89,6 +90,35 @@ def test_measured_pv_camera_uses_negative_z_as_forward():
     torch.testing.assert_close(output[0, valid, 1], torch.tensor([-2.0]))
 
 
+def test_measured_camera_uses_asymmetric_principal_point_frustum():
+    identity = torch.tensor([[[0.0, 0.0, 0.0, 1.0]]])
+    point = torch.tensor([[[[0.75, 0.0, -1.0]]]])
+    output = compute_ego_visible_scene_pointcloud_obs(
+        reference_body_pos=torch.zeros(1, 1, 3),
+        reference_body_rot=identity,
+        object_pos=torch.zeros(1, 1, 3),
+        object_rot=identity,
+        neutral_pointclouds=point,
+        neutral_pointcloud_normals=torch.zeros_like(point),
+        object_valid_mask=torch.ones(1, 1, dtype=torch.bool),
+        object_static_mask=torch.ones(1, 1, dtype=torch.bool),
+        head_body_id=0,
+        num_samples=1,
+        motion_ids=torch.tensor([0]),
+        motion_times=torch.tensor([0.0]),
+        camera_world_from=torch.eye(4).reshape(1, 1, 4, 4),
+        camera_tan_h=torch.full((1, 1), 0.5),
+        camera_tan_v=torch.full((1, 1), 0.5),
+        camera_tan_left=torch.full((1, 1), 0.5),
+        camera_tan_right=torch.full((1, 1), 1.0),
+        camera_tan_top=torch.full((1, 1), 0.5),
+        camera_tan_bottom=torch.full((1, 1), 0.5),
+        camera_num_frames=torch.tensor([1]),
+        camera_reference_root=torch.zeros(1, 1, 3),
+    ).reshape(1, 1, 8)
+    assert output[0, 0, -1] == 1.0
+
+
 def test_static_point_remains_in_causal_memory_after_camera_turns_away():
     body_pos = torch.zeros(1, 1, 3)
     body_rot = torch.tensor([[[0.0, 0.0, 0.0, 1.0]]])
@@ -123,3 +153,104 @@ def test_static_point_remains_in_causal_memory_after_camera_turns_away():
     ).reshape(1, 1, 8)
     assert second[0, 0, -1] > 0.5
     assert second[0, 0, 1] > 0.0
+
+
+def test_history_metadata_tracks_visibility_age_and_episode_reset():
+    body_pos = torch.zeros(1, 1, 3)
+    identity = torch.tensor([[[0.0, 0.0, 0.0, 1.0]]])
+    kwargs = dict(
+        reference_body_pos=body_pos,
+        object_pos=torch.zeros(1, 1, 3),
+        object_rot=identity,
+        neutral_pointclouds=torch.tensor([[[[0.0, -2.0, 0.0]]]]),
+        neutral_pointcloud_normals=torch.zeros(1, 1, 1, 3),
+        object_valid_mask=torch.ones(1, 1, dtype=torch.bool),
+        object_static_mask=torch.ones(1, 1, dtype=torch.bool),
+        head_body_id=0,
+        num_samples=1,
+        camera_offset_head=(0.0, 0.0, 0.0),
+        accumulate_history=True,
+        include_history_metadata=True,
+        history_age_scale_steps=4.0,
+    )
+    current = compute_ego_visible_scene_pointcloud_obs(
+        reference_body_rot=identity, progress_buf=torch.tensor([0]), **kwargs
+    ).reshape(1, 1, 10)
+    assert current[0, 0, 7] == 1.0
+    assert current[0, 0, 8] == 0.0
+
+    turned = torch.tensor([[[0.0, 0.0, 1.0, 0.0]]])
+    remembered = compute_ego_visible_scene_pointcloud_obs(
+        reference_body_rot=turned, progress_buf=torch.tensor([2]), **kwargs
+    ).reshape(1, 1, 10)
+    assert remembered[0, 0, 7] == 0.0
+    assert remembered[0, 0, 8] == 0.5
+    assert remembered[0, 0, 9] == 1.0
+
+    reset = compute_ego_visible_scene_pointcloud_obs(
+        reference_body_rot=turned, progress_buf=torch.tensor([0]), **kwargs
+    ).reshape(1, 1, 10)
+    assert reset[0, 0, 9] == 0.0
+
+
+def test_tracking_reset_preserves_history_until_motion_time_rewinds():
+    identity = torch.tensor([[[0.0, 0.0, 0.0, 1.0]]])
+    turned = torch.tensor([[[0.0, 0.0, 1.0, 0.0]]])
+    kwargs = dict(
+        reference_body_pos=torch.zeros(1, 1, 3),
+        object_pos=torch.zeros(1, 1, 3),
+        object_rot=identity,
+        neutral_pointclouds=torch.tensor([[[[0.0, -2.0, 0.0]]]]),
+        neutral_pointcloud_normals=torch.zeros(1, 1, 1, 3),
+        object_valid_mask=torch.ones(1, 1, dtype=torch.bool),
+        object_static_mask=torch.ones(1, 1, dtype=torch.bool),
+        head_body_id=0,
+        num_samples=1,
+        camera_offset_head=(0.0, 0.0, 0.0),
+        accumulate_history=True,
+        include_history_metadata=True,
+        history_age_scale_steps=4.0,
+        motion_ids=torch.tensor([0]),
+    )
+    compute_ego_visible_scene_pointcloud_obs(
+        reference_body_rot=identity,
+        progress_buf=torch.tensor([0]),
+        motion_times=torch.tensor([0.0]),
+        **kwargs,
+    )
+    continued = compute_ego_visible_scene_pointcloud_obs(
+        reference_body_rot=turned,
+        progress_buf=torch.tensor([0]),
+        motion_times=torch.tensor([1.0 / 30.0]),
+        **kwargs,
+    ).reshape(1, 1, 10)
+    assert continued[0, 0, 9] == 1.0
+    assert continued[0, 0, 8] == pytest.approx(0.25)
+
+    rewound = compute_ego_visible_scene_pointcloud_obs(
+        reference_body_rot=turned,
+        progress_buf=torch.tensor([0]),
+        motion_times=torch.tensor([0.0]),
+        **kwargs,
+    ).reshape(1, 1, 10)
+    assert rewound[0, 0, 9] == 0.0
+
+
+def test_minimum_valid_points_reports_empty_frame():
+    identity = torch.tensor([[[0.0, 0.0, 0.0, 1.0]]])
+    with pytest.raises(RuntimeError, match="minimum_valid_points=1"):
+        compute_ego_visible_scene_pointcloud_obs(
+            reference_body_pos=torch.zeros(1, 1, 3),
+            reference_body_rot=identity,
+            object_pos=torch.zeros(1, 1, 3),
+            object_rot=identity,
+            neutral_pointclouds=torch.tensor([[[[0.0, 2.0, 0.0]]]]),
+            neutral_pointcloud_normals=torch.zeros(1, 1, 1, 3),
+            object_valid_mask=torch.ones(1, 1, dtype=torch.bool),
+            object_static_mask=torch.ones(1, 1, dtype=torch.bool),
+            head_body_id=0,
+            num_samples=1,
+            camera_offset_head=(0.0, 0.0, 0.0),
+            minimum_valid_points=1,
+            progress_buf=torch.tensor([7]),
+        )

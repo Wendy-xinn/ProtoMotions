@@ -75,6 +75,9 @@ from protomotions.envs.obs.local_scene_pointcloud import compute_local_scene_poi
 from protomotions.envs.obs.ego_visible_scene_pointcloud import (
     compute_ego_visible_scene_pointcloud_obs,
 )
+from protomotions.envs.obs.precomputed_ego_scene_map import (
+    compute_precomputed_ego_scene_map_obs,
+)
 from protomotions.envs.obs.contact_feedback import (
     compute_body_contact_feedback_obs,
     compute_reference_contact_obs,
@@ -145,6 +148,7 @@ __all__ = [
     "compute_scene_object_token_obs",
     "compute_local_scene_pointcloud_obs",
     "compute_ego_visible_scene_pointcloud_obs",
+    "compute_precomputed_ego_scene_map_obs",
     "compute_body_contact_feedback_obs",
     "compute_reference_contact_obs",
     "compute_future_scene_interaction_targets",

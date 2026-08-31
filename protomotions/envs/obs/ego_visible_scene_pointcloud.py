@@ -38,12 +38,17 @@ def compute_ego_visible_scene_pointcloud_obs(
     accumulate_history: bool = False,
     include_history_metadata: bool = False,
     history_age_scale_steps: float = 256.0,
+    minimum_valid_points: int = 0,
     progress_buf: Tensor | None = None,
     motion_ids: Tensor | None = None,
     motion_times: Tensor | None = None,
     camera_world_from: Tensor | None = None,
     camera_tan_h: Tensor | None = None,
     camera_tan_v: Tensor | None = None,
+    camera_tan_left: Tensor | None = None,
+    camera_tan_right: Tensor | None = None,
+    camera_tan_top: Tensor | None = None,
+    camera_tan_bottom: Tensor | None = None,
     camera_num_frames: Tensor | None = None,
     camera_reference_root: Tensor | None = None,
     camera_fps: float = 30.0,
@@ -61,6 +66,8 @@ def compute_ego_visible_scene_pointcloud_obs(
     """
     num_envs, num_objects = object_pos.shape[:2]
     if num_objects == 0 or neutral_pointclouds.shape[2] == 0:
+        if minimum_valid_points > 0:
+            raise RuntimeError("Ego scene point cloud has no candidate geometry")
         feature_dim = 10 if include_history_metadata else 8
         return reference_body_pos.new_zeros((num_envs, num_samples * feature_dim))
 
@@ -116,6 +123,17 @@ def compute_ego_visible_scene_pointcloud_obs(
         )
         tan_h = camera_tan_h[motion_ids, frame_indices].unsqueeze(-1)
         tan_v = camera_tan_v[motion_ids, frame_indices].unsqueeze(-1)
+        if camera_tan_left is None:
+            tan_left = tan_right = tan_h
+            tan_top = tan_bottom = tan_v
+        else:
+            assert camera_tan_right is not None
+            assert camera_tan_top is not None
+            assert camera_tan_bottom is not None
+            tan_left = camera_tan_left[motion_ids, frame_indices].unsqueeze(-1)
+            tan_right = camera_tan_right[motion_ids, frame_indices].unsqueeze(-1)
+            tan_top = camera_tan_top[motion_ids, frame_indices].unsqueeze(-1)
+            tan_bottom = camera_tan_bottom[motion_ids, frame_indices].unsqueeze(-1)
     else:
         head_pos = reference_body_pos[:, head_body_id]
         head_rot = reference_body_rot[:, head_body_id]
@@ -136,6 +154,8 @@ def compute_ego_visible_scene_pointcloud_obs(
         ).reshape(num_envs, available, 3)
         tan_h = math.tan(math.radians(horizontal_fov_deg) * 0.5)
         tan_v = math.tan(math.radians(vertical_fov_deg) * 0.5)
+        tan_left = tan_right = tan_h
+        tan_top = tan_bottom = tan_v
 
     # SOMA local axes: right=+X, forward=-Y, up=+Z.
     depth = -camera_points[..., 1]
@@ -148,14 +168,16 @@ def compute_ego_visible_scene_pointcloud_obs(
         object_valid
         & (depth >= near_m)
         & (depth <= far_m)
-        & (x_ratio.abs() <= tan_h)
-        & (z_ratio.abs() <= tan_v)
+        & (x_ratio >= -tan_left)
+        & (x_ratio <= tan_right)
+        & (z_ratio >= -tan_bottom)
+        & (z_ratio <= tan_top)
     )
 
     # Coarse angular z-buffer. scatter_reduce is deterministic and avoids
     # depending on a renderer, so this observation also works headlessly.
-    pixel_x = (((x_ratio / tan_h) + 1.0) * 0.5 * image_width).long()
-    pixel_y = (((z_ratio / tan_v) + 1.0) * 0.5 * image_height).long()
+    pixel_x = ((x_ratio + tan_left) / (tan_left + tan_right) * image_width).long()
+    pixel_y = ((z_ratio + tan_bottom) / (tan_bottom + tan_top) * image_height).long()
     pixel_x = pixel_x.clamp(0, image_width - 1)
     pixel_y = pixel_y.clamp(0, image_height - 1)
     pixel_index = pixel_y * image_width + pixel_x
@@ -177,12 +199,16 @@ def compute_ego_visible_scene_pointcloud_obs(
     if accumulate_history:
         if progress_buf is None:
             raise ValueError("progress_buf is required when accumulate_history=True")
+        if (motion_ids is None) != (motion_times is None):
+            raise ValueError("motion_ids and motion_times must be provided together")
+        use_motion_clock = motion_ids is not None
         memory_key = (
             neutral_pointclouds.device.type,
             neutral_pointclouds.device.index,
             neutral_pointclouds.data_ptr(),
             num_envs,
             available,
+            use_motion_clock,
         )
         state = _EGO_SCENE_MEMORY.get(memory_key)
         if state is None or state["seen_static"].shape != visible.shape:
@@ -190,16 +216,37 @@ def compute_ego_visible_scene_pointcloud_obs(
                 "seen_static": torch.zeros_like(visible),
                 "last_seen_step": torch.full_like(visible, -1, dtype=torch.long),
                 "previous_progress": torch.full_like(progress_buf, -1),
+                "previous_motion_ids": (
+                    torch.full_like(motion_ids, -1) if motion_ids is not None else None
+                ),
+                "previous_motion_times": (
+                    torch.full_like(motion_times, -1.0)
+                    if motion_times is not None
+                    else None
+                ),
             }
             _EGO_SCENE_MEMORY[memory_key] = state
         previous_progress = state["previous_progress"]
-        reset = (progress_buf == 0) | (progress_buf < previous_progress)
+        if use_motion_clock:
+            assert motion_ids is not None
+            assert motion_times is not None
+            assert state["previous_motion_ids"] is not None
+            assert state["previous_motion_times"] is not None
+            reset = (motion_ids != state["previous_motion_ids"]) | (
+                motion_times + 1.0e-6 < state["previous_motion_times"]
+            )
+            history_step = torch.floor(motion_times * camera_fps + 1.0e-5).long()
+            state["previous_motion_ids"].copy_(motion_ids)
+            state["previous_motion_times"].copy_(motion_times)
+        else:
+            reset = (progress_buf == 0) | (progress_buf < previous_progress)
+            history_step = progress_buf.to(torch.long)
         if reset.any():
             state["seen_static"][reset] = False
             state["last_seen_step"][reset] = -1
         static_points = static
         state["seen_static"] |= visible & static_points
-        current_step = progress_buf.to(torch.long).unsqueeze(-1).expand_as(visible)
+        current_step = history_step.unsqueeze(-1).expand_as(visible)
         state["last_seen_step"] = torch.where(
             visible, current_step, state["last_seen_step"]
         )
@@ -233,7 +280,7 @@ def compute_ego_visible_scene_pointcloud_obs(
     if include_history_metadata:
         if accumulate_history:
             selected_last_seen = state["last_seen_step"].gather(1, indices)
-            current_step = progress_buf.to(torch.long).unsqueeze(-1)
+            current_step = history_step.unsqueeze(-1)
             selected_age = (current_step - selected_last_seen).clamp_min(0)
             selected_age = selected_age.to(camera_points.dtype)
             selected_age = (selected_age / history_age_scale_steps).clamp_max(1.0)
@@ -251,4 +298,17 @@ def compute_ego_visible_scene_pointcloud_obs(
             [features, features.new_zeros(num_envs, num_samples - selected_count, feature_dim)],
             dim=1,
         )
+    if minimum_valid_points > 0:
+        valid_counts = selected_valid.sum(dim=1)
+        failed = valid_counts < minimum_valid_points
+        if failed.any():
+            failed_envs = failed.nonzero(as_tuple=False).flatten().tolist()
+            frame_text = "unknown"
+            if progress_buf is not None:
+                frame_text = str(progress_buf[failed].tolist())
+            raise RuntimeError(
+                "Ego scene memory below minimum_valid_points="
+                f"{minimum_valid_points}; envs={failed_envs}, frames={frame_text}, "
+                f"counts={valid_counts[failed].tolist()}"
+            )
     return features.reshape(num_envs, num_samples * feature_dim)

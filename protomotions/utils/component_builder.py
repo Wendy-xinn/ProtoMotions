@@ -58,6 +58,9 @@ def build_scene_lib_from_config(
     """
     from protomotions.components.scene_lib import SceneLib
 
+    if scene_weights is None:
+        scene_weights = scene_lib_config.replication_weights
+
     # Create SceneLib (config required, handles None scene_file - creates empty)
     return SceneLib(
         config=scene_lib_config,

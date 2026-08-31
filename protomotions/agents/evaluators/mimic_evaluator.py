@@ -229,6 +229,12 @@ class MimicEvaluator(BaseEvaluator):
         Returns:
             List of (env_ids, motion_ids) tuples
         """
+        scene_batch_builder = getattr(
+            self.motion_manager, "build_scene_matched_eval_batches", None
+        )
+        if scene_batch_builder is not None:
+            return scene_batch_builder()
+
         fixed_motion_ids, first_env_indices = (
             self.motion_manager.get_unique_fixed_motions()
         )

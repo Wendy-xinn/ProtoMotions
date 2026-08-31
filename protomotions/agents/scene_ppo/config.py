@@ -56,6 +56,7 @@ class TrajectorySceneCrossAttentionEncoderConfig(SceneFeatureEncoderConfig):
     feedforward_dim: int = 256
     dropout: float = 0.0
     condition_mode: str = "full"
+    use_scene_history_token: bool = False
 
 
 @dataclass

@@ -53,8 +53,19 @@ This note records the changes intentionally deferred after
 
 ## Scene memory and camera model
 
-- Replace the current nearest-256-point snapshot with two levels: 256--512
-  current local geometry points plus 32--64 persistent spatial memory tokens.
+- The implemented baseline keeps a causal set of static surface points. Each
+  point has camera-local position/normal, static state, current visibility,
+  normalized age, and validity. A dedicated learned scene-history token now
+  summarizes map occupancy, current/remembered fractions, age, centroid,
+  spread, and distance statistics before head-to-scene cross-attention.
+- Keep `scene_pointcloud_candidates` and `scene_pointcloud_input_samples`
+  separate. The former controls surface coverage and the GPU visibility
+  kernel; the latter controls attention length. Keep 256/256 as the matched
+  baseline. Increasing candidates alone changes the nearest-point selection,
+  so evaluate 512/512 as the clean density ablation.
+- A future higher-capacity version can replace the single summary token with
+  32--64 persistent spatial memory tokens if the single-token ablation is
+  positive but loses geometry needed after the object leaves view.
 - Maintain the persistent map once per recording in world coordinates using a
   voxel/hash representation. Store geometry, normals, first-seen frame, and
   optional last-seen/age; never expose cells whose first-seen frame is later
@@ -78,3 +89,47 @@ This note records the changes intentionally deferred after
 - Add scheduled sampling or short student-unrolled fine-tuning after SFT to
   reduce exposure-bias drift, followed by RLFT only after the SFT baseline is
   stable.
+
+## Validation and throughput
+
+Build the frame-aligned causal scene maps once, then validate the complete
+window pack before training:
+
+```bash
+scripts/prepare_egobody_gpc_window_data.sh
+
+IsaacLab/.venv/bin/python data/scripts/validate_egobody_gpc_window_pack.py \
+  --manifest data/motion_for_trackers/egobody_smpl_ego_v1/sft_diverse_800_192/window_sft_orientation_v1/train/manifest.json \
+  --expected-frames 192 --expected-points 256
+```
+
+The current train pack contains 650 SOMA23 clips of 192 frames across 14
+physical EgoBody scenes. Each clip stores a 256-point, 10-feature map for every
+GT ego-camera frame. The map is causal: current geometry and static surfaces
+seen during frames `0:t` are available at frame `t`; future visibility is not.
+The validator checks clip/scene alignment, finite features, frame counts,
+causality metadata, and point/history coverage. Empty frames remain masked
+rather than receiving fabricated geometry.
+
+Online sampling is scene matched. Each physical scene owns a shuffled queue of
+all fixed 32-transition windows plus one random-start window per clip. The
+fixed starts cover every transition in a 192-frame clip; tracking-error
+termination resets directly into another scene-compatible window. Scene
+replication is weighted by clip count so large physical scenes receive more
+parallel environments. Full evaluation also pairs every motion with an env
+containing its physical scene.
+
+Start the headless baseline with:
+
+```bash
+GPC_NUM_ENVS=64 GPC_BATCH_SIZE=1024 \
+  scripts/train_egobody_gpc_window_sft.sh
+```
+
+At 64 envs, one iteration contains 2,048 simulator transitions. The default
+run overwrites `last.ckpt` every 25 iterations, evaluates all 650 complete
+clips every 250 iterations, and keeps an `epoch_N.ckpt` every 1,000 iterations.
+Evaluation reports success rate, GT error, global-root error, and maximum joint
+error. Increase env count only after measuring both steady-state VRAM and FPS;
+with batch size 1,024, 96 envs is the next compatible setting because
+`96 * 32 = 3,072`.

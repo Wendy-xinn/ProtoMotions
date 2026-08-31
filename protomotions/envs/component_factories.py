@@ -357,6 +357,10 @@ def load_ego_camera_trajectory_params(
     )
     tan_h = torch.ones((len(clips), max_frames), dtype=torch.float32)
     tan_v = torch.ones((len(clips), max_frames), dtype=torch.float32)
+    tan_left = torch.ones((len(clips), max_frames), dtype=torch.float32)
+    tan_right = torch.ones((len(clips), max_frames), dtype=torch.float32)
+    tan_top = torch.ones((len(clips), max_frames), dtype=torch.float32)
+    tan_bottom = torch.ones((len(clips), max_frames), dtype=torch.float32)
     reference_root = torch.zeros((len(clips), max_frames, 3), dtype=torch.float32)
     num_frames = torch.empty(len(clips), dtype=torch.long)
     for clip_id, clip in enumerate(clips):
@@ -369,17 +373,33 @@ def load_ego_camera_trajectory_params(
         world_from[clip_id, :count] = clip["world_from_camera"].float()
         tan_h[clip_id, :count] = 0.5 * float(clip["width"]) / clip["fx"].float()
         tan_v[clip_id, :count] = 0.5 * float(clip["height"]) / clip["fy"].float()
+        tan_left[clip_id, :count] = float(clip["cx"]) / clip["fx"].float()
+        tan_right[clip_id, :count] = (
+            float(clip["width"]) - float(clip["cx"])
+        ) / clip["fx"].float()
+        tan_top[clip_id, :count] = float(clip["cy"]) / clip["fy"].float()
+        tan_bottom[clip_id, :count] = (
+            float(clip["height"]) - float(clip["cy"])
+        ) / clip["fy"].float()
         reference_root[clip_id, :count] = clip["reference_root"].float()
         if count < max_frames:
             world_from[clip_id, count:] = world_from[clip_id, count - 1]
             tan_h[clip_id, count:] = tan_h[clip_id, count - 1]
             tan_v[clip_id, count:] = tan_v[clip_id, count - 1]
+            tan_left[clip_id, count:] = tan_left[clip_id, count - 1]
+            tan_right[clip_id, count:] = tan_right[clip_id, count - 1]
+            tan_top[clip_id, count:] = tan_top[clip_id, count - 1]
+            tan_bottom[clip_id, count:] = tan_bottom[clip_id, count - 1]
             reference_root[clip_id, count:] = reference_root[clip_id, count - 1]
 
     return {
         "camera_world_from": world_from,
         "camera_tan_h": tan_h,
         "camera_tan_v": tan_v,
+        "camera_tan_left": tan_left,
+        "camera_tan_right": tan_right,
+        "camera_tan_top": tan_top,
+        "camera_tan_bottom": tan_bottom,
         "camera_num_frames": num_frames,
         "camera_reference_root": reference_root,
         "camera_fps": camera_fps,
@@ -396,6 +416,7 @@ def ego_visible_scene_pointcloud_obs_factory(
     accumulate_history: bool = False,
     include_history_metadata: bool = False,
     history_age_scale_steps: float = 256.0,
+    minimum_valid_points: int = 0,
     camera_trajectory_file: str | None = None,
     camera_fps: float = 30.0,
 ) -> MdpComponent:
@@ -423,6 +444,7 @@ def ego_visible_scene_pointcloud_obs_factory(
         "accumulate_history": accumulate_history,
         "include_history_metadata": include_history_metadata,
         "history_age_scale_steps": history_age_scale_steps,
+        "minimum_valid_points": minimum_valid_points,
     }
     if camera_trajectory_file is not None:
         dynamic_vars.update(
@@ -440,6 +462,15 @@ def ego_visible_scene_pointcloud_obs_factory(
         dynamic_vars=dynamic_vars,
         static_params=static_params,
     )
+
+
+def precomputed_ego_scene_map_obs_factory(scene_map_file: str) -> MdpComponent:
+    """Load frame-aligned GT ego maps and gather them by motion time."""
+    from protomotions.envs.precomputed_scene_map_component import (
+        PrecomputedEgoSceneMapComponent,
+    )
+
+    return PrecomputedEgoSceneMapComponent(scene_map_file)
 
 
 def body_contact_feedback_obs_factory(

@@ -12,11 +12,14 @@ ONLINE_BATCH_SIZE="${ONLINE_BATCH_SIZE:-128}"
 ONLINE_ITERATIONS="${ONLINE_ITERATIONS:-500}"
 ONLINE_MINI_EPOCHS="${ONLINE_MINI_EPOCHS:-1}"
 ONLINE_POINTCLOUD_CANDIDATES="${ONLINE_POINTCLOUD_CANDIDATES:-256}"
+ONLINE_POINTCLOUD_INPUT_SAMPLES="${ONLINE_POINTCLOUD_INPUT_SAMPLES:-256}"
+ONLINE_POINTCLOUD_WORKERS="${ONLINE_POINTCLOUD_WORKERS:-8}"
 ONLINE_POINTCLOUD_SEED="${ONLINE_POINTCLOUD_SEED:-0}"
 ONLINE_EXPERIMENT_NAME="${ONLINE_EXPERIMENT_NAME:-egobody_gpc_online_sft_40_head_feedback_v1}"
 ONLINE_CHECKPOINT="${ONLINE_CHECKPOINT:-}"
 HEAD_ORIENTATION_FEEDBACK_GAIN="${HEAD_ORIENTATION_FEEDBACK_GAIN:-1.0}"
 CONDITION_MODE="${CONDITION_MODE:-full}"
+MINIMUM_SCENE_POINTS="${MINIMUM_SCENE_POINTS:-0}"
 
 export MPLCONFIGDIR="${MPLCONFIGDIR:-/tmp/protomotions-matplotlib-${USER:-user}}"
 mkdir -p "$MPLCONFIGDIR"
@@ -37,6 +40,11 @@ if [[ ! -f "$split_manifest" ]]; then
     echo "Missing online split: $split_manifest" >&2
     exit 2
 fi
+
+"$PYTHON_BIN" data/scripts/validate_egobody_gpc_pack.py \
+    --pack-root "$ONLINE_PACK_ROOT" \
+    --splits "$ONLINE_SPLIT" \
+    --expected-frames 192
 
 readarray -t online_inputs < <(
     "$PYTHON_BIN" - "$split_manifest" "$PREPARED_MANIFEST" <<'PY'
@@ -69,6 +77,9 @@ if [[ -n "$ONLINE_CHECKPOINT" ]]; then
     checkpoint_args+=(
         --checkpoint "$ONLINE_CHECKPOINT"
         --resume-training-max-iterations "$ONLINE_ITERATIONS"
+        --resume-motion-file "${online_inputs[0]}"
+        --resume-scenes-file "${online_inputs[1]}"
+        --resume-ego-camera-file "${online_inputs[2]}"
     )
 fi
 
@@ -76,6 +87,7 @@ result_dir="$REPO_ROOT/results/$ONLINE_EXPERIMENT_NAME"
 mkdir -p "$result_dir"
 echo "EgoBody online expert SFT: split=$ONLINE_SPLIT envs=$num_envs iterations=$ONLINE_ITERATIONS"
 echo "batch=$ONLINE_BATCH_SIZE mini_epochs=$ONLINE_MINI_EPOCHS pointcloud_seed=$ONLINE_POINTCLOUD_SEED"
+echo "pointcloud_candidates=$ONLINE_POINTCLOUD_CANDIDATES input_samples=$ONLINE_POINTCLOUD_INPUT_SAMPLES workers=$ONLINE_POINTCLOUD_WORKERS"
 
 cd "$REPO_ROOT"
 exec "$REPO_ROOT/scripts/run_with_memory_guard.sh" \
@@ -93,7 +105,10 @@ exec "$REPO_ROOT/scripts/run_with_memory_guard.sh" \
     --num-mini-epochs "$ONLINE_MINI_EPOCHS" \
     --head-orientation-feedback-gain "$HEAD_ORIENTATION_FEEDBACK_GAIN" \
     --condition-mode "$CONDITION_MODE" \
+    --minimum-scene-points "$MINIMUM_SCENE_POINTS" \
     --scene-pointcloud-candidates "$ONLINE_POINTCLOUD_CANDIDATES" \
+    --scene-pointcloud-input-samples "$ONLINE_POINTCLOUD_INPUT_SAMPLES" \
+    --scene-pointcloud-workers "$ONLINE_POINTCLOUD_WORKERS" \
     --scene-pointcloud-seed "$ONLINE_POINTCLOUD_SEED" \
     --save-last-checkpoint-every 25 \
     --eval-metrics-every 1000000 \
