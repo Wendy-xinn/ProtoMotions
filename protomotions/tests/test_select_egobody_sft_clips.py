@@ -1,3 +1,4 @@
+import json
 import importlib.util
 from pathlib import Path
 
@@ -51,3 +52,39 @@ def test_balanced_top_rejects_an_unavailable_clip_budget():
 
     with pytest.raises(RuntimeError, match="Only 1 spaced clips"):
         selector.balanced_top(candidates, count=2, min_start_gap=96)
+
+
+def test_body_text_segments_drop_the_repeated_boundary_frame(tmp_path):
+    selector = _load_selector()
+    text_dir = tmp_path / "recording" / "body_idx_0"
+    text_dir.mkdir(parents=True)
+    (text_dir / "000.json").write_text(
+        json.dumps({"0": "a", "1": "b", "2": "c"})
+    )
+    (text_dir / "001.json").write_text(
+        json.dumps({"0": "c", "1": "d", "2": "e"})
+    )
+    info = {"body_idx_fpv": "0 female", "start_frame": "10", "end_frame": "14"}
+
+    body_name, timeline, exact = selector.load_body_text_timeline(
+        tmp_path, "recording", info
+    )
+
+    assert body_name == "body_idx_0"
+    assert timeline == ["a", "b", "c", "d", "e"]
+    assert exact is True
+
+
+def test_body_text_length_mismatch_is_explicitly_recording_level(tmp_path):
+    selector = _load_selector()
+    text_dir = tmp_path / "recording" / "body_idx_1"
+    text_dir.mkdir(parents=True)
+    (text_dir / "000.json").write_text(json.dumps({"0": "a", "1": "b"}))
+    info = {"body_idx_fpv": "1 male", "start_frame": "10", "end_frame": "14"}
+
+    _, timeline, exact = selector.load_body_text_timeline(
+        tmp_path, "recording", info
+    )
+
+    assert timeline == ["a", "b"]
+    assert exact is False

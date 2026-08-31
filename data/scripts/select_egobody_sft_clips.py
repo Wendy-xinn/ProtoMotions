@@ -13,7 +13,10 @@ import csv
 import heapq
 import inspect
 import json
+import math
 import pickle
+import re
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -43,6 +46,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--frames", type=int, default=192)
     parser.add_argument("--candidate-stride", type=int, default=48)
     parser.add_argument("--score-stride", type=int, default=8)
+    parser.add_argument(
+        "--body-text-root",
+        type=Path,
+        default=None,
+        help="Optional frame-level EgoBody body-description root.",
+    )
+    parser.add_argument(
+        "--minimum-motion-score",
+        type=float,
+        default=0.0,
+        help="Reject low-motion candidate windows before scalable selection.",
+    )
     parser.add_argument("--train-recordings", type=int, default=10)
     parser.add_argument("--clips-per-train-recording", type=int, default=4)
     parser.add_argument("--val-recordings", type=int, default=5)
@@ -115,7 +130,7 @@ def load_sparse_pose(path: Path) -> tuple[np.ndarray, np.ndarray]:
 
 def score_window(
     frame_root: Path, start: int, frames: int, score_stride: int
-) -> float | None:
+) -> dict[str, float] | None:
     sample_ids = list(range(start, start + frames, score_stride))
     if sample_ids[-1] != start + frames - 1:
         sample_ids.append(start + frames - 1)
@@ -133,7 +148,199 @@ def score_window(
     root_span = np.linalg.norm(translations.max(0) - translations.min(0))
     pose_motion = np.linalg.norm(np.diff(poses, axis=0), axis=-1).mean()
     # Root travel favors walking; pose motion retains seated/interaction clips.
-    return float(2.0 * root_path + root_span + 0.2 * pose_motion)
+    return {
+        "motion_score": float(2.0 * root_path + root_span + 0.2 * pose_motion),
+        "root_travel_m": float(root_path),
+        "root_span_m": float(root_span),
+        "mean_sampled_pose_delta": float(pose_motion),
+    }
+
+
+def load_body_text_timeline(
+    body_text_root: Path, recording: str, info: dict[str, str]
+) -> tuple[str, list[str], bool]:
+    body_index = int(info["body_idx_fpv"].split()[0])
+    body_name = f"body_idx_{body_index}"
+    text_dir = body_text_root / recording / body_name
+    timeline = []
+    for segment_index, path in enumerate(sorted(text_dir.glob("*.json"))):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        descriptions = [payload[str(index)] for index in range(len(payload))]
+        if segment_index > 0:
+            descriptions = descriptions[1:]
+        timeline.extend(descriptions)
+    expected = int(info["end_frame"]) - int(info["start_frame"]) + 1
+    if not timeline:
+        raise ValueError(f"No body text found for {recording}/{body_name}")
+    return body_name, timeline, len(timeline) == expected
+
+
+def _token_set(text: str) -> set[str]:
+    return set(re.findall(r"[a-z]+", text.lower()))
+
+
+def describe_text_window(descriptions: list[str]) -> dict:
+    sampled = descriptions[::8]
+    if (len(descriptions) - 1) % 8 != 0:
+        sampled.append(descriptions[-1])
+    lowered = [text.lower() for text in sampled]
+    patterns = {
+        "arms_raised": r"raised|higher than (?:his |her |their )?.*shoulder|above (?:his |her |their )?.*shoulder",
+        "horizontal_limb": r"horizontal|parallel to (?:the )?(?:ground|floor)",
+        "torso_lean": r"\blean(?:s|ing|ed)?\b|torso is (?:almost )?horizontal",
+        "deep_knee_bend": r"knees?.{0,80}(?:rather|fully|deeply|almost completely) bent",
+        "hands_close": r"hands?.{0,60}(?:joined|close|near|together)",
+        "asymmetric_arms": r"(?:behind|in front of|ahead of).{0,80}(?:elbow|arm|hand)",
+    }
+    fractions = {
+        name: sum(bool(re.search(pattern, text)) for text in lowered) / len(lowered)
+        for name, pattern in patterns.items()
+    }
+    tags = sorted(name for name, fraction in fractions.items() if fraction >= 0.1)
+    changes = []
+    token_sets = [_token_set(text) for text in sampled]
+    for left, right in zip(token_sets, token_sets[1:]):
+        union = left | right
+        changes.append(0.0 if not union else 1.0 - len(left & right) / len(union))
+    representative_indices = sorted({0, len(descriptions) // 2, len(descriptions) - 1})
+    return {
+        "text_tags": tags,
+        "text_tag_fractions": {key: round(value, 4) for key, value in fractions.items()},
+        "text_change_score": round(float(np.mean(changes)) if changes else 0.0, 4),
+        "representative_descriptions": [descriptions[index] for index in representative_indices],
+    }
+
+
+def attach_text_features(
+    candidates: list[dict],
+    body_text_root: Path,
+    recording: str,
+    info: dict[str, str],
+) -> None:
+    body_name, timeline, exact_alignment = load_body_text_timeline(
+        body_text_root, recording, info
+    )
+    first_frame = int(info["start_frame"])
+    for candidate in candidates:
+        local_start = candidate["start"] - first_frame
+        local_end = local_start + candidate["count"]
+        descriptions = (
+            timeline[local_start:local_end] if exact_alignment else timeline
+        )
+        if exact_alignment and len(descriptions) != candidate["count"]:
+            raise ValueError(f"Incomplete body text for {recording} at {candidate['start']}")
+        candidate["body_text_source"] = f"EgoBody/{recording}/{body_name}"
+        candidate["body_text_alignment"] = (
+            "exact_frame_window" if exact_alignment else "recording_level_only"
+        )
+        candidate.update(describe_text_window(descriptions))
+        dynamic_tags = []
+        if candidate["root_span_m"] >= 0.75:
+            dynamic_tags.append("locomotion")
+        elif candidate["root_span_m"] >= 0.25:
+            dynamic_tags.append("short_translation")
+        else:
+            dynamic_tags.append("in_place_motion")
+        candidate["motion_tags"] = dynamic_tags
+        candidate["selection_tags"] = sorted(
+            set(candidate["text_tags"] + dynamic_tags)
+        )
+
+
+def assign_diversity_scores(candidates_by_recording: dict[str, list[dict]]) -> None:
+    candidates = [item for items in candidates_by_recording.values() for item in items]
+    tag_counts = Counter(
+        tag for candidate in candidates for tag in candidate.get("selection_tags", [])
+    )
+    total = max(len(candidates), 1)
+    for candidate in candidates:
+        rarity = sum(
+            math.log1p(total / tag_counts[tag])
+            for tag in candidate.get("selection_tags", [])
+        )
+        candidate["diversity_score"] = candidate["motion_score"] + 0.15 * rarity
+
+
+def write_text_selection_records(output: Path, clips: list[dict]) -> None:
+    annotated = [clip for clip in clips if "body_text_source" in clip]
+    if not annotated:
+        return
+    jsonl_path = output.with_name("clip_text_records.jsonl")
+    with jsonl_path.open("w", encoding="utf-8") as handle:
+        for clip in annotated:
+            record = {
+                "dataset_source": "EgoBody",
+                "clip_id": clip["clip_id"],
+                "split": clip["split"],
+                "recording": clip["recording"],
+                "source_frame_start": clip["start"],
+                "source_frame_end": clip["end"],
+                "frame_count": clip["count"],
+                "body_text_source": clip["body_text_source"],
+                "body_text_alignment": clip["body_text_alignment"],
+                "motion_score": clip["motion_score"],
+                "root_travel_m": clip["root_travel_m"],
+                "root_span_m": clip["root_span_m"],
+                "mean_sampled_pose_delta": clip["mean_sampled_pose_delta"],
+                "motion_tags": clip["motion_tags"],
+                "text_tags": clip["text_tags"],
+                "text_change_score": clip["text_change_score"],
+                "representative_descriptions": clip["representative_descriptions"],
+            }
+            handle.write(json.dumps(record, ensure_ascii=True) + "\n")
+
+    tag_counts = Counter(
+        tag for clip in annotated for tag in clip.get("selection_tags", [])
+    )
+    scores = np.asarray([clip["motion_score"] for clip in annotated])
+    split_counts = Counter(clip["split"] for clip in annotated)
+    recording_counts = {
+        split: len({clip["recording"] for clip in annotated if clip["split"] == split})
+        for split in ("train", "val", "test")
+    }
+    alignment_counts = Counter(clip["body_text_alignment"] for clip in annotated)
+    report_path = output.with_name("SELECTION_REPORT.md")
+    lines = [
+        "# EgoBody Diverse Motion Selection",
+        "",
+        "This selection is sourced from the **EgoBody dataset**. Body descriptions",
+        "come from the aligned `texts/body_texts/EgoBody` frame annotations. It is",
+        "not sourced from EgoExo4D or AMASS.",
+        "",
+        "## Dataset",
+        "",
+        f"- Clips: {len(annotated)}",
+        f"- Frames per clip: {annotated[0]['count']}",
+        f"- Split clips: {dict(split_counts)}",
+        f"- Split recordings: {recording_counts}",
+        f"- Body-text alignment: {dict(alignment_counts)}",
+        f"- Motion-score range: {scores.min():.4f}--{scores.max():.4f}",
+        f"- Motion-score median: {np.median(scores):.4f}",
+        "- Split isolation: official EgoBody recording-level train/val/test split",
+        "",
+        "Low-motion windows below the configured threshold were rejected; a whole",
+        "recording is never included merely because that recording was eligible.",
+        "Rare body-text posture tags receive a diversity bonus during ranking.",
+        "Descriptions with `recording_level_only` alignment are used only for",
+        "recording-level diversity; they are not claimed as exact clip captions.",
+        "",
+        "## Selected Tags",
+        "",
+        "| tag | clips |",
+        "|---|---:|",
+    ]
+    lines.extend(f"| {tag} | {count} |" for tag, count in tag_counts.most_common())
+    lines.extend(
+        [
+            "",
+            "## Records",
+            "",
+            "Per-clip source frames, motion statistics, tags, and representative",
+            f"frame descriptions are stored in `{jsonl_path.name}`.",
+            "",
+        ]
+    )
+    report_path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def candidate_windows(
@@ -174,8 +381,8 @@ def candidate_windows(
         padded = np.concatenate(([start], covered, [end]))
         if int(np.diff(padded).max(initial=0)) > 8:
             continue
-        score = score_window(frame_root, start, frames, score_stride)
-        if score is None:
+        metrics = score_window(frame_root, start, frames, score_stride)
+        if metrics is None:
             continue
         candidates.append(
             {
@@ -185,8 +392,8 @@ def candidate_windows(
                 "start": start,
                 "count": frames,
                 "end": end,
-                "motion_score": score,
                 "observed_camera_frames": int(covered.size),
+                **metrics,
             }
         )
     return candidates
@@ -209,7 +416,9 @@ def spaced_top(candidates: list[dict], min_start_gap: int) -> list[dict]:
     """Keep high-motion windows while limiting near-duplicate temporal crops."""
     selected = []
     for candidate in sorted(
-        candidates, key=lambda item: item["motion_score"], reverse=True
+        candidates,
+        key=lambda item: item.get("diversity_score", item["motion_score"]),
+        reverse=True,
     ):
         if all(
             abs(candidate["start"] - prior["start"]) >= min_start_gap
@@ -239,7 +448,11 @@ def balanced_top(
                 candidate = items[depth]
                 heapq.heappush(
                     round_candidates,
-                    (-candidate["motion_score"], recording, candidate),
+                        (
+                            -candidate.get("diversity_score", candidate["motion_score"]),
+                            recording,
+                            candidate,
+                        ),
                 )
         if not round_candidates:
             available = sum(len(items) for items in queues.values())
@@ -283,8 +496,21 @@ def main() -> None:
                     args.candidate_stride,
                     args.score_stride,
                 )
+                candidates = [
+                    item
+                    for item in candidates
+                    if item["motion_score"] >= args.minimum_motion_score
+                ]
+                if args.body_text_root is not None and candidates:
+                    attach_text_features(
+                        candidates,
+                        args.body_text_root.resolve(),
+                        recording,
+                        infos[recording],
+                    )
                 if candidates:
                     candidates_by_recording[recording] = candidates
+            assign_diversity_scores(candidates_by_recording)
             split_clips = balanced_top(
                 candidates_by_recording, count, args.min_start_gap
             )
@@ -333,6 +559,11 @@ def main() -> None:
         "egobody_root": str(root),
         "frame_count": args.frames,
         "selection_seed": args.seed,
+        "dataset_source": "EgoBody",
+        "body_text_root": (
+            str(args.body_text_root.resolve()) if args.body_text_root is not None else None
+        ),
+        "minimum_motion_score": args.minimum_motion_score,
         "split_clip_counts": (
             dict(zip(("train", "val", "test"), args.split_clip_counts))
             if args.split_clip_counts is not None
@@ -346,6 +577,7 @@ def main() -> None:
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    write_text_selection_records(args.output, clips)
     print(f"Wrote {len(clips)} clips to {args.output}")
     for split in targets:
         split_clips = [item for item in clips if item["split"] == split]
