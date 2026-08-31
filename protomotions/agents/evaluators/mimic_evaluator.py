@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import torch
 from torch import Tensor
+from rich.progress import Progress
 
 from protomotions.agents.evaluators.base_evaluator import BaseEvaluator
 from protomotions.agents.evaluators.config import MimicEvaluatorConfig
@@ -193,6 +194,18 @@ class MimicEvaluator(BaseEvaluator):
             if not active.any():
                 break
 
+            progress = getattr(self, "_clip_progress", None)
+            if progress is not None and (step_idx == 0 or (step_idx + 1) % 8 == 0):
+                progress.update(
+                    self._clip_progress_task,
+                    description=(
+                        f"Evaluating {self._eval_scene_label} "
+                        f"batch {self._eval_batch_index}/{self._eval_batch_count} "
+                        f"step {step_idx + 1}/{max_steps} "
+                        f"active {int(active.sum())}"
+                    ),
+                )
+
             actions = self._policy_action(obs_td)
 
             # Apply EMA smoothing (deployment simulation)
@@ -233,21 +246,45 @@ class MimicEvaluator(BaseEvaluator):
 
     def run_evaluation(self) -> None:
         """Run evaluation across multiple motions."""
-        for env_ids, motion_ids in self._build_eval_batches():
-            motion_lengths = self.motion_lib.get_motion_length(motion_ids)
-            max_len = min(
-                (motion_lengths.max() / self.env.dt).floor().long().item(),
-                self.config.max_eval_steps,
-            )
-            # Build episode context before evaluate_episode so hooks can read it
-            self._episode_ctx = MimicEpisodeContext(
-                motion_ids=motion_ids,
-                frame_limits=(motion_lengths / self.env.dt)
-                .floor()
-                .long()
-                .clamp(max=self.config.max_eval_steps),
-            )
-            self.evaluate_episode(env_ids, max_len)
+        batches = self._build_eval_batches()
+        total_clips = sum(int(motion_ids.numel()) for _, motion_ids in batches)
+        with Progress(disable=self.fabric.global_rank != 0) as progress:
+            task = progress.add_task("Evaluating clips", total=total_clips)
+            self._clip_progress = progress
+            self._clip_progress_task = task
+            self._eval_batch_count = len(batches)
+            try:
+                for batch_index, (env_ids, motion_ids) in enumerate(batches, start=1):
+                    motion_lengths = self.motion_lib.get_motion_length(motion_ids)
+                    max_len = min(
+                        (motion_lengths.max() / self.env.dt).floor().long().item(),
+                        self.config.max_eval_steps,
+                    )
+                    self._episode_ctx = MimicEpisodeContext(
+                        motion_ids=motion_ids,
+                        frame_limits=(motion_lengths / self.env.dt)
+                        .floor()
+                        .long()
+                        .clamp(max=self.config.max_eval_steps),
+                    )
+                    self._eval_batch_index = batch_index
+                    scene_ids = getattr(self.motion_manager, "scene_ids_per_env", None)
+                    if scene_ids:
+                        active_scene_ids = {
+                            scene_ids[env_id] for env_id in env_ids.detach().cpu().tolist()
+                        }
+                        self._eval_scene_label = (
+                            next(iter(active_scene_ids))
+                            if len(active_scene_ids) == 1
+                            else f"{len(active_scene_ids)} scenes"
+                        )
+                    else:
+                        self._eval_scene_label = "motions"
+                    self.evaluate_episode(env_ids, max_len)
+                    progress.advance(task, int(motion_ids.numel()))
+            finally:
+                del self._clip_progress
+                del self._clip_progress_task
 
     def _build_eval_batches(self):
         """Build list of (env_ids, motion_ids) batches to evaluate.

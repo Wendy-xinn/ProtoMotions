@@ -115,6 +115,8 @@ def test_scene_window_manager_builds_scene_matched_eval_batches():
     manager = _window_manager()
     batches = manager.build_scene_matched_eval_batches()
 
+    assert len(batches) == 2
+    assert all(env_ids.numel() == 2 for env_ids, _ in batches)
     pairs = []
     for env_ids, motion_ids in batches:
         for env_id, motion_id in zip(env_ids.tolist(), motion_ids.tolist()):

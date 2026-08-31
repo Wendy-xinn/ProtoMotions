@@ -129,32 +129,39 @@ class SceneWindowMotionManager(MimicMotionManager):
         return done if env_ids is None else done[env_ids]
 
     def build_scene_matched_eval_batches(self):
-        """Pair every motion with envs that contain its physical scene."""
+        """Pair every motion with matching envs while filling all scenes per round."""
+        envs_by_scene: dict[str, list[int]] = defaultdict(list)
+        for env_id, scene_id in enumerate(self.scene_ids_per_env):
+            envs_by_scene[scene_id].append(env_id)
+
+        offsets = {scene_id: 0 for scene_id in self._motions_by_scene}
         batches = []
-        for scene_id, motion_ids in self._motions_by_scene.items():
-            env_ids = [
-                env_id
-                for env_id, env_scene_id in enumerate(self.scene_ids_per_env)
-                if env_scene_id == scene_id
-            ]
-            if not env_ids:
-                raise ValueError(f"No evaluation environment for scene {scene_id}")
-            for start in range(0, len(motion_ids), len(env_ids)):
-                batch_motion_ids = motion_ids[start : start + len(env_ids)]
-                batches.append(
-                    (
-                        torch.tensor(
-                            env_ids[: len(batch_motion_ids)],
-                            device=self.device,
-                            dtype=torch.long,
-                        ),
-                        torch.tensor(
-                            batch_motion_ids,
-                            device=self.device,
-                            dtype=torch.long,
-                        ),
-                    )
+        while True:
+            batch_env_ids = []
+            batch_motion_ids = []
+            for scene_id, motion_ids in self._motions_by_scene.items():
+                env_ids = envs_by_scene[scene_id]
+                if not env_ids:
+                    raise ValueError(f"No evaluation environment for scene {scene_id}")
+                start = offsets[scene_id]
+                if start >= len(motion_ids):
+                    continue
+                selected = motion_ids[start : start + len(env_ids)]
+                batch_env_ids.extend(env_ids[: len(selected)])
+                batch_motion_ids.extend(selected)
+                offsets[scene_id] += len(selected)
+            if not batch_motion_ids:
+                break
+            batches.append(
+                (
+                    torch.tensor(
+                        batch_env_ids, device=self.device, dtype=torch.long
+                    ),
+                    torch.tensor(
+                        batch_motion_ids, device=self.device, dtype=torch.long
+                    ),
                 )
+            )
         return batches
 
     def get_state_dict(self):
