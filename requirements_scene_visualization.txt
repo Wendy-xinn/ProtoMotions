@@ -1,0 +1,3 @@
+# Browser viewer used by examples/visualize_trumans_preprocessing.py.
+# The existing TRUMANS setup runs this from the crisp conda environment.
+viser==0.2.7

@@ -273,6 +273,251 @@ def nearest_surface_obs_factory(
     )
 
 
+def scene_object_state_obs_factory() -> MdpComponent:
+    """Factory for ego-local object pose/velocity/validity observations."""
+    from protomotions.envs.obs import compute_scene_object_state_obs
+
+    return MdpComponent(
+        compute_func=compute_scene_object_state_obs,
+        dynamic_vars={
+            "root_pos": EnvContext.current.root_pos,
+            "root_rot": EnvContext.current.root_rot,
+            "object_pos": EnvContext.scene.object_pos,
+            "object_rot": EnvContext.scene.object_rot,
+            "object_vel": EnvContext.scene.object_vel,
+            "object_ang_vel": EnvContext.scene.object_ang_vel,
+            "object_valid_mask": EnvContext.scene.object_valid_mask,
+        },
+    )
+
+
+def scene_object_token_obs_factory(num_classes: int = 6) -> MdpComponent:
+    """Factory for geometry-aware, fixed-slot object tokens."""
+    from protomotions.envs.obs import compute_scene_object_token_obs
+
+    return MdpComponent(
+        compute_func=compute_scene_object_token_obs,
+        dynamic_vars={
+            "root_pos": EnvContext.current.root_pos,
+            "root_rot": EnvContext.current.root_rot,
+            "object_pos": EnvContext.scene.object_pos,
+            "object_rot": EnvContext.scene.object_rot,
+            "object_vel": EnvContext.scene.object_vel,
+            "object_ang_vel": EnvContext.scene.object_ang_vel,
+            "object_valid_mask": EnvContext.scene.object_valid_mask,
+            "object_bbox_extents": EnvContext.scene.object_bbox_extents,
+            "object_static_mask": EnvContext.scene.object_static_mask,
+            "object_class_ids": EnvContext.scene.object_class_ids,
+        },
+        static_params={"num_classes": num_classes},
+    )
+
+
+def local_scene_pointcloud_obs_factory(
+    num_samples: int = 128, crop_radius_m: float = 3.0
+) -> MdpComponent:
+    """Factory for nearest ego-local primitive surface samples."""
+    from protomotions.envs.obs import compute_local_scene_pointcloud_obs
+
+    return MdpComponent(
+        compute_func=compute_local_scene_pointcloud_obs,
+        dynamic_vars={
+            "root_pos": EnvContext.current.root_pos,
+            "root_rot": EnvContext.current.root_rot,
+            "rigid_body_pos": EnvContext.current.rigid_body_pos,
+            "object_pos": EnvContext.scene.object_pos,
+            "object_rot": EnvContext.scene.object_rot,
+            "neutral_pointclouds": EnvContext.scene.neutral_pointclouds,
+            "neutral_pointcloud_normals": EnvContext.scene.neutral_pointcloud_normals,
+            "object_valid_mask": EnvContext.scene.object_valid_mask,
+            "object_static_mask": EnvContext.scene.object_static_mask,
+        },
+        static_params={
+            "num_samples": num_samples,
+            "crop_radius_m": crop_radius_m,
+        },
+    )
+
+
+def load_ego_camera_trajectory_params(
+    camera_trajectory_file: str,
+    camera_fps: float = 30.0,
+) -> dict[str, torch.Tensor | float]:
+    """Load and pad packaged ego-camera trajectories for an observation component."""
+    camera_data = torch.load(
+        camera_trajectory_file, weights_only=False, map_location="cpu"
+    )
+    clips = camera_data["motions"]
+    if not clips:
+        raise ValueError(f"No camera motions found in {camera_trajectory_file}")
+
+    max_frames = max(len(clip["world_from_camera"]) for clip in clips)
+    world_from = torch.eye(4).reshape(1, 1, 4, 4).repeat(
+        len(clips), max_frames, 1, 1
+    )
+    tan_h = torch.ones((len(clips), max_frames), dtype=torch.float32)
+    tan_v = torch.ones((len(clips), max_frames), dtype=torch.float32)
+    reference_root = torch.zeros((len(clips), max_frames, 3), dtype=torch.float32)
+    num_frames = torch.empty(len(clips), dtype=torch.long)
+    for clip_id, clip in enumerate(clips):
+        count = len(clip["world_from_camera"])
+        if count == 0:
+            raise ValueError(
+                f"Camera motion {clip_id} has no frames in {camera_trajectory_file}"
+            )
+        num_frames[clip_id] = count
+        world_from[clip_id, :count] = clip["world_from_camera"].float()
+        tan_h[clip_id, :count] = 0.5 * float(clip["width"]) / clip["fx"].float()
+        tan_v[clip_id, :count] = 0.5 * float(clip["height"]) / clip["fy"].float()
+        reference_root[clip_id, :count] = clip["reference_root"].float()
+        if count < max_frames:
+            world_from[clip_id, count:] = world_from[clip_id, count - 1]
+            tan_h[clip_id, count:] = tan_h[clip_id, count - 1]
+            tan_v[clip_id, count:] = tan_v[clip_id, count - 1]
+            reference_root[clip_id, count:] = reference_root[clip_id, count - 1]
+
+    return {
+        "camera_world_from": world_from,
+        "camera_tan_h": tan_h,
+        "camera_tan_v": tan_v,
+        "camera_num_frames": num_frames,
+        "camera_reference_root": reference_root,
+        "camera_fps": camera_fps,
+    }
+
+
+def ego_visible_scene_pointcloud_obs_factory(
+    head_body_id: int,
+    num_samples: int = 512,
+    horizontal_fov_deg: float = 90.0,
+    vertical_fov_deg: float = 60.0,
+    near_m: float = 0.05,
+    far_m: float = 6.0,
+    accumulate_history: bool = False,
+    include_history_metadata: bool = False,
+    history_age_scale_steps: float = 256.0,
+    camera_trajectory_file: str | None = None,
+    camera_fps: float = 30.0,
+) -> MdpComponent:
+    """Build an offline virtual-head-camera visible scene observation."""
+    from protomotions.envs.obs import compute_ego_visible_scene_pointcloud_obs
+
+    dynamic_vars = {
+        "reference_body_pos": EnvContext.mimic.ref_state.rigid_body_pos,
+        "reference_body_rot": EnvContext.mimic.ref_state.rigid_body_rot,
+        "object_pos": EnvContext.scene.object_pos,
+        "object_rot": EnvContext.scene.object_rot,
+        "neutral_pointclouds": EnvContext.scene.neutral_pointclouds,
+        "neutral_pointcloud_normals": EnvContext.scene.neutral_pointcloud_normals,
+        "object_valid_mask": EnvContext.scene.object_valid_mask,
+        "object_static_mask": EnvContext.scene.object_static_mask,
+        "progress_buf": EnvContext.progress_buf,
+    }
+    static_params = {
+        "head_body_id": head_body_id,
+        "num_samples": num_samples,
+        "horizontal_fov_deg": horizontal_fov_deg,
+        "vertical_fov_deg": vertical_fov_deg,
+        "near_m": near_m,
+        "far_m": far_m,
+        "accumulate_history": accumulate_history,
+        "include_history_metadata": include_history_metadata,
+        "history_age_scale_steps": history_age_scale_steps,
+    }
+    if camera_trajectory_file is not None:
+        dynamic_vars.update(
+            {
+                "motion_ids": EnvContext.motion_ids,
+                "motion_times": EnvContext.motion_times,
+            }
+        )
+        static_params.update(
+            load_ego_camera_trajectory_params(camera_trajectory_file, camera_fps)
+        )
+
+    return MdpComponent(
+        compute_func=compute_ego_visible_scene_pointcloud_obs,
+        dynamic_vars=dynamic_vars,
+        static_params=static_params,
+    )
+
+
+def body_contact_feedback_obs_factory(
+    body_ids: Optional[List[int]] = None, force_scale: float = 100.0
+) -> MdpComponent:
+    """Factory for current binary contacts and normalized contact force."""
+    from protomotions.envs.obs import compute_body_contact_feedback_obs
+
+    return MdpComponent(
+        compute_func=compute_body_contact_feedback_obs,
+        dynamic_vars={
+            "rigid_body_contacts": EnvContext.current.rigid_body_contacts,
+            "current_contact_force_magnitudes": EnvContext.current_contact_force_magnitudes,
+        },
+        static_params={"body_ids": body_ids, "force_scale": force_scale},
+    )
+
+
+def reference_contact_obs_factory() -> MdpComponent:
+    """Factory for intended reference contacts; keep this critic-only."""
+    from protomotions.envs.obs import compute_reference_contact_obs
+
+    return MdpComponent(
+        compute_func=compute_reference_contact_obs,
+        dynamic_vars={
+            "rigid_body_contacts": EnvContext.mimic.ref_state.rigid_body_contacts,
+        },
+    )
+
+
+def future_scene_query_obs_factory(
+    body_ids: Optional[List[int]] = None,
+) -> MdpComponent:
+    """Factory for privileged future body positions in the current heading frame."""
+    from protomotions.envs.obs import compute_future_scene_query_obs
+
+    return MdpComponent(
+        compute_func=compute_future_scene_query_obs,
+        dynamic_vars={
+            "future_body_pos": EnvContext.mimic.future_pos,
+            "root_pos": EnvContext.current.root_pos,
+            "root_rot": EnvContext.current.root_rot,
+        },
+        static_params={"body_ids": body_ids},
+    )
+
+
+def future_scene_interaction_target_obs_factory(
+    body_ids: Optional[List[int]] = None,
+    contact_threshold_m: float = 0.05,
+    distance_scale_m: float = 0.5,
+    terrain_horizontal_scale: float = 0.1,
+) -> MdpComponent:
+    """Factory for future body-to-surface distance/contact labels."""
+    from protomotions.envs.obs import compute_future_scene_interaction_targets
+
+    return MdpComponent(
+        compute_func=compute_future_scene_interaction_targets,
+        dynamic_vars={
+            "future_body_pos": EnvContext.mimic.future_pos,
+            "root_pos": EnvContext.current.root_pos,
+            "root_rot": EnvContext.current.root_rot,
+            "height_points": EnvContext.terrain.height_points,
+            "height_samples": EnvContext.terrain.height_samples,
+            "object_pos": EnvContext.scene.object_pos,
+            "object_rot": EnvContext.scene.object_rot,
+            "neutral_pointclouds": EnvContext.scene.neutral_pointclouds,
+            "object_valid_mask": EnvContext.scene.object_valid_mask,
+        },
+        static_params={
+            "body_ids": body_ids,
+            "contact_threshold_m": contact_threshold_m,
+            "distance_scale_m": distance_scale_m,
+            "terrain_horizontal_scale": terrain_horizontal_scale,
+        },
+    )
+
+
 def mimic_target_poses_max_coords_factory(
     use_noisy: bool = False,
     with_velocities: bool = True,
@@ -1801,6 +2046,13 @@ __all__ = [
     "historical_reduced_coords_obs_factory",
     "previous_actions_factory",
     "nearest_surface_obs_factory",
+    "scene_object_state_obs_factory",
+    "scene_object_token_obs_factory",
+    "local_scene_pointcloud_obs_factory",
+    "body_contact_feedback_obs_factory",
+    "reference_contact_obs_factory",
+    "future_scene_query_obs_factory",
+    "future_scene_interaction_target_obs_factory",
     "mimic_target_poses_max_coords_factory",
     "mimic_target_poses_future_rel_factory",
     "mimic_target_poses_reduced_coords_factory",

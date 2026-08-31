@@ -167,6 +167,11 @@ class BaseAgent:
         self.step_count = 0
         self.current_epoch = 0
         self.fit_start_time = None
+        # Wall-clock time is kept only as checkpoint metadata.  Durations must
+        # use a monotonic clock because WSL/NTP can move CLOCK_REALTIME
+        # backwards while a run is active.
+        self._fit_session_start_monotonic = None
+        self._training_elapsed_before_session = 0.0
         self.best_evaluated_score = None
 
         # Hacky flag to skip policy update right after eval to avoid training spikes
@@ -355,6 +360,9 @@ class BaseAgent:
             self.step_count = state_dict["step_count"]
         if "run_start_time" in state_dict:
             self.fit_start_time = state_dict["run_start_time"]
+        self._training_elapsed_before_session = float(
+            state_dict.get("training_elapsed_seconds", 0.0)
+        )
 
         self.best_evaluated_score = state_dict.get("best_evaluated_score", None)
 
@@ -393,6 +401,7 @@ class BaseAgent:
             "epoch": self.current_epoch,
             "step_count": self.step_count,
             "run_start_time": self.fit_start_time,
+            "training_elapsed_seconds": self._training_elapsed_seconds(),
             "best_evaluated_score": self.best_evaluated_score,
         }
 
@@ -427,6 +436,7 @@ class BaseAgent:
             "epoch": self.current_epoch,
             "step_count": self.step_count,
             "run_start_time": self.fit_start_time,
+            "training_elapsed_seconds": self._training_elapsed_seconds(),
             "best_evaluated_score": self.best_evaluated_score,
         }
         state_dict.update(extra_state_dict)
@@ -522,9 +532,14 @@ class BaseAgent:
         try:
             if new_high_score and self.fabric.global_rank == 0:
                 torch.save(state_dict, save_dir / "score_based.ckpt")
+                torch.save(state_dict, save_dir / "best.ckpt")
                 if inference_state_dict is not None:
                     self.save_inference_checkpoint(
                         "score_based.ckpt",
+                        inference_state_dict,
+                    )
+                    self.save_inference_checkpoint(
+                        "best.ckpt",
                         inference_state_dict,
                     )
         except Exception as error:
@@ -534,7 +549,7 @@ class BaseAgent:
         if new_high_score:
             log.info(
                 f"New best performing controller found with score {self.best_evaluated_score}. "
-                f"Model saved to {save_dir / 'score_based.ckpt'}"
+                f"Model saved to {save_dir / 'best.ckpt'}"
             )
 
         dist.barrier()
@@ -700,10 +715,12 @@ class BaseAgent:
         done_indices = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
         if self.fit_start_time is None:
             self.fit_start_time = time.time()
+        if self._fit_session_start_monotonic is None:
+            self._fit_session_start_monotonic = time.monotonic()
         self.fabric.call("on_fit_start", self)
 
         while self.current_epoch < self.max_epochs:
-            self.epoch_start_time = time.time()
+            self.epoch_start_time = time.monotonic()
 
             # Set networks in eval mode so that normalizers are not updated
             self.eval()
@@ -1083,7 +1100,8 @@ class BaseAgent:
         pass
 
     def post_epoch_logging(self, training_log_dict: Dict):
-        end_time = time.time()
+        end_time = time.monotonic()
+        elapsed_training_seconds = self._training_elapsed_seconds(end_time)
 
         # Get mean episode statistics and clear meters
         episode_reward_dict = self.episode_reward_meter.mean_and_clear()
@@ -1100,9 +1118,9 @@ class BaseAgent:
             "info/gframes": torch.tensor(self.step_count / (10**9)),
             "times/fps_last_epoch": (self.num_steps * self.get_step_count_increment())
             / (end_time - self.epoch_start_time),
-            "times/fps_total": self.step_count / (end_time - self.fit_start_time),
-            "times/training_hours": (end_time - self.fit_start_time) / 3600,
-            "times/training_minutes": (end_time - self.fit_start_time) / 60,
+            "times/fps_total": self.step_count / max(elapsed_training_seconds, 1e-6),
+            "times/training_hours": elapsed_training_seconds / 3600,
+            "times/training_minutes": elapsed_training_seconds / 60,
             "times/last_epoch_seconds": (end_time - self.epoch_start_time),
             "rewards/task_rewards": self.experience_buffer.rewards.mean().item(),
         }
@@ -1135,6 +1153,37 @@ class BaseAgent:
         # wandb logger does this: assert rank_zero_only.rank == 0
         # Pass current_epoch so TensorBoard knows the X-axis value
         self.fabric.log_dict(aggregated_log_dict, step=self.current_epoch)
+
+        if self.fabric.global_rank == 0:
+            epoch_seconds = float(aggregated_log_dict["times/last_epoch_seconds"])
+            elapsed_seconds = float(elapsed_training_seconds)
+            remaining_epochs = max(0, self.max_epochs - self.current_epoch)
+            eta_seconds = epoch_seconds * remaining_epochs
+
+            def _clock(seconds: float) -> str:
+                total = max(0, int(round(seconds)))
+                hours, remainder = divmod(total, 3600)
+                minutes, secs = divmod(remainder, 60)
+                return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+            print(
+                f"Epoch {self.current_epoch}/{self.max_epochs} | "
+                f"epoch {_clock(epoch_seconds)} | "
+                f"elapsed {_clock(elapsed_seconds)} | "
+                f"ETA {_clock(eta_seconds)} | "
+                f"frames {self.step_count:,}",
+                flush=True,
+            )
+
+    def _training_elapsed_seconds(self, now_monotonic: Optional[float] = None) -> float:
+        """Active training duration, immune to wall-clock/timezone changes."""
+        elapsed = float(getattr(self, "_training_elapsed_before_session", 0.0))
+        session_start = getattr(self, "_fit_session_start_monotonic", None)
+        if session_start is not None:
+            if now_monotonic is None:
+                now_monotonic = time.monotonic()
+            elapsed += max(0.0, now_monotonic - session_start)
+        return elapsed
 
     # -----------------------------
     # Helper Functions

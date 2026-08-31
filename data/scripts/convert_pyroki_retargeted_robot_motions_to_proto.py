@@ -236,6 +236,7 @@ def main(
     robot_mjcf_mapping = {
         "g1": "g1_bm_box_feet.xml",
         "h1_2": "h1_2.xml",
+        "soma23": "soma23_humanoid.xml",
     }
 
     # Get kinematic info for the specified robot
@@ -319,9 +320,18 @@ def main(
             # to ensure joint angles falls into [-pi, pi]
             # otherwise we can simply use the joint angles as dof_pos
             qpos = extract_qpos_from_transforms(
-                kinematic_info, root_pos, joint_rot_mats
+                kinematic_info,
+                root_pos,
+                joint_rot_mats,
+                multi_dof_decomposition_method=(
+                    "euler_xyz" if robot_type == "soma23" else None
+                ),
             )
-            motion.dof_pos = qpos[:, 7:]
+            # SOMA23 contains mirrored hinge axes (for example left-side x is
+            # negative), so a generic XYZ matrix decomposition is not expected
+            # to reproduce the original scalar URDF coordinates. Preserve the
+            # PyRoki joint coordinates, which already follow MJCF joint order.
+            motion.dof_pos = joint_angles if robot_type == "soma23" else qpos[:, 7:]
 
             allowed_delta = [0.0, 2 * np.pi, 4 * np.pi]
 
@@ -332,7 +342,8 @@ def main(
             allowed = torch.zeros_like(delta, dtype=torch.bool)
             for d in allowed_delta:
                 allowed |= (delta - d).abs() < epsilon
-            assert allowed.all(), "qpos and joint_angles are not allowed (exceeds allowed delta with epsilon tolerance)"
+            if robot_type != "soma23":
+                assert allowed.all(), "qpos and joint_angles are not allowed (exceeds allowed delta with epsilon tolerance)"
 
             dof_vel = compute_cartesian_velocity(
                 batched_robot_pos=joint_angles.unsqueeze(1),

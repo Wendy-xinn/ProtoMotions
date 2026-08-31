@@ -5,6 +5,7 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Optional
 from protomotions.agents.base_agent.config import BaseModelConfig, OptimizerConfig
 from protomotions.agents.common.config import ModuleContainerConfig
 from protomotions.agents.common.supervision import SupervisionLossConfig
@@ -98,6 +99,13 @@ class MaskedMimicModelConfig(BaseModelConfig):
         default_factory=lambda: OptimizerConfig(lr=2e-5),
         metadata={"help": "Optimizer settings for supervised training."},
     )
+    interaction_target_key: Optional[str] = None
+    interaction_distance_prediction_key: str = "student_scene_distance_pred"
+    interaction_contact_prediction_key: str = "student_scene_contact_logits"
+    interaction_num_targets: int = 0
+    interaction_distance_loss_weight: float = 0.0
+    interaction_contact_loss_weight: float = 0.0
+    interaction_contact_focal_gamma: float = 2.0
 
 @dataclass
 class MaskedMimicSupervisedAgentConfig(SupervisedAgentConfig):

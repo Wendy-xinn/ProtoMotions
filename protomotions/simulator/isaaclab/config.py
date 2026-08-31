@@ -69,3 +69,15 @@ class IsaacLabSimulatorConfig(SimulatorConfig):
         default_factory=IsaacLabSimParams,
         metadata={"help": "IsaacLab-specific simulation parameters."}
     )
+    enable_object_contact_sensors: bool = field(
+        default=False,
+        metadata={
+            "help": "Build expensive object-object force matrices. Not needed for humanoid contact rewards."
+        },
+    )
+    enable_body_contact_filter_matrix: bool = field(
+        default=False,
+        metadata={
+            "help": "Build per-body filtered pair matrices. Net body forces remain available when false."
+        },
+    )

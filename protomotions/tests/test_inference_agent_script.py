@@ -134,12 +134,24 @@ def test_inference_parser_requires_checkpoint_and_parses_options(monkeypatch, tm
             "mujoco",
             "--full-eval",
             "--headless",
+            "--oracle-target-tokens",
+            "--deterministic-tokens",
             "--num-envs",
             "4",
             "--motion-file",
             "motion.pt",
+            "--motion-id",
+            "2",
             "--scenes-file",
             "scene.yaml",
+            "--ego-camera-file",
+            "ego_camera.pt",
+            "--offline-token-eval-cache",
+            "cache.pt",
+            "--offline-token-eval-observations",
+            "rollout.pt",
+            "--offline-token-eval-output",
+            "report.json",
             "--command-source",
             "target=keyboard",
             "--overrides",
@@ -150,10 +162,17 @@ def test_inference_parser_requires_checkpoint_and_parses_options(monkeypatch, tm
     assert parsed.checkpoint == str(checkpoint)
     assert parsed.simulator == "mujoco"
     assert parsed.full_eval is True
+    assert parsed.deterministic_tokens is True
+    assert parsed.motion_id == 2
     assert parsed.headless is True
+    assert parsed.oracle_target_tokens is True
     assert parsed.num_envs == 4
     assert parsed.motion_file == "motion.pt"
     assert parsed.scenes_file == "scene.yaml"
+    assert parsed.ego_camera_file == "ego_camera.pt"
+    assert parsed.offline_token_eval_cache == "cache.pt"
+    assert parsed.offline_token_eval_observations == "rollout.pt"
+    assert parsed.offline_token_eval_output == "report.json"
     assert parsed.command_source == ["target=keyboard"]
     assert parsed.overrides == ["env.max_episode_length=5"]
 

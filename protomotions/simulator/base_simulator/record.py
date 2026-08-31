@@ -97,6 +97,34 @@ class RecordingMixin:
     # Marker management
     # -------------------------
 
+    def _get_recording_scene_offset(self) -> torch.Tensor:
+        """Return the simulator-world offset of the recorded scene.
+
+        Scene environments are placed in a terrain playground away from the
+        local asset origin.  Deriving the complete XYZ offset from a fixed
+        object's live pose also captures terrain-height correction, which is
+        not represented by SceneLib's XY-only ``scene_offsets`` property.
+        """
+        zero = torch.zeros(3, dtype=torch.float32)
+        if (
+            self.scene_lib is None
+            or self.scene_lib.num_scenes() == 0
+            or not self._recorded_objects
+        ):
+            return zero
+
+        eid = self._recording_env_id
+        scene_idx = self.scene_lib._scene_to_original_scene_id[eid].item()
+        scene = self.scene_lib._original_scenes[scene_idx]
+        live_positions = self._recorded_objects[0][0]
+        for obj_idx, obj in enumerate(scene.objects):
+            if obj.options.fix_base_link:
+                local_position = torch.as_tensor(
+                    obj.translation[0], dtype=live_positions.dtype
+                )
+                return (live_positions[obj_idx].cpu() - local_position.cpu()).clone()
+        return zero
+
     def _toggle_markers(self):
         self._show_markers = not self._show_markers
         print(f"Markers are now {'visible' if self._show_markers else 'hidden'}")
@@ -121,19 +149,33 @@ class RecordingMixin:
                 markers_state[key].orientation = rotations.xyzw_to_wxyz(
                     markers_state[key].orientation
                 )
+        # Headless recordings may contain data-only marker streams (notably
+        # synchronized reference poses) that intentionally have no simulator
+        # visualization object. Keep them in ``_last_markers_state`` for the
+        # recorder, but only send instantiated markers to the renderer.
+        render_markers_state = {
+            key: value
+            for key, value in markers_state.items()
+            if key in self._original_marker_configs
+        }
         if not self._show_markers:
-            for key in markers_state.keys():
+            for key in render_markers_state.keys():
                 # Throw it out of view
-                markers_state[key].translation = (
-                    torch.zeros_like(markers_state[key].translation) - 1000000
+                render_markers_state[key].translation = (
+                    torch.zeros_like(render_markers_state[key].translation) - 1000000
                 )
-        self._update_simulator_markers(markers_state)
+        if render_markers_state:
+            self._update_simulator_markers(render_markers_state)
 
-    def _build_markers_save_data(self) -> dict:
+    def _build_markers_save_data(
+        self, scene_offset: Optional[torch.Tensor] = None
+    ) -> dict:
         """Build markers data dictionary for saving to .markers.pt file."""
         markers_data = {"fps": 30, "markers": {}}
         for name, frame_list in self._recorded_markers.items():
             translations = torch.stack([f[0] for f in frame_list], dim=0)
+            if scene_offset is not None:
+                translations = translations - scene_offset
             orientations = torch.stack([f[1] for f in frame_list], dim=0)
             # Get marker config metadata from the original (pre-simulator)
             # configs, since simulator-specific init may wrap/replace them
@@ -162,23 +204,24 @@ class RecordingMixin:
     def _build_terrain_save_data(self) -> Optional[dict]:
         """Build terrain data dictionary for saving to .terrain.pt file.
 
-        Returns None if terrain is flat or not available.
+        A flat terrain is saved as an all-zero height field as well.  Keeping
+        the sidecar for both flat and non-flat runs makes visualisation and
+        dataset comparisons reproducible.
         """
         terrain = getattr(self, "terrain", None)
         if terrain is None:
-            return None
-
-        # Skip saving for flat terrains — Blender's default ground plane suffices
-        if terrain.is_flat():
             return None
 
         return {
             "height_field_raw": terrain.height_field_raw,
             "horizontal_scale": terrain.horizontal_scale,
             "vertical_scale": terrain.vertical_scale,
+            "slope_threshold": terrain.config.slope_threshold,
         }
 
-    def _build_objects_save_data(self) -> dict:
+    def _build_objects_save_data(
+        self, scene_offset: Optional[torch.Tensor] = None
+    ) -> dict:
         """Build objects data dictionary for saving to .objects.pt file."""
         objects_list = []
 
@@ -192,6 +235,8 @@ class RecordingMixin:
             )
 
             translations = torch.stack([f[0] for f in self._recorded_objects], dim=0)
+            if scene_offset is not None:
+                translations = translations - scene_offset
             rotations = torch.stack([f[1] for f in self._recorded_objects], dim=0)
 
             eid = self._recording_env_id
@@ -237,6 +282,8 @@ class RecordingMixin:
             proj_pos = torch.stack(
                 [f[0] for f in self._recorded_projectiles], dim=0
             )  # [num_frames, num_proj, 3]
+            if scene_offset is not None:
+                proj_pos = proj_pos - scene_offset
             proj_rot = torch.stack(
                 [f[1] for f in self._recorded_projectiles], dim=0
             )  # [num_frames, num_proj, 4]
@@ -275,7 +322,17 @@ class RecordingMixin:
         3. Video compilation when recording ends
         4. Cleanup of temporary image files
         """
-        if not self.headless:
+        # Motion/state recording is independent of viewport rendering.  In
+        # headless runs the same state-change machinery records and serializes
+        # motion/GT/object sidecars, while PNG capture is skipped entirely.
+        # This avoids constructing a Kit/RTX window merely to export data for
+        # an external viewer such as Viser.
+        if (
+            not self.headless
+            or self._user_is_recording
+            or self._user_recording_state_change
+            or self._delete_user_viewer_recordings
+        ):
             # Handle recording state transitions
             if self._user_recording_state_change:
                 if self._user_is_recording:
@@ -310,8 +367,6 @@ class RecordingMixin:
                     )
                 else:
                     # Finalize recording and create video
-                    from moviepy import ImageSequenceClip
-
                     image_dir = self._curr_user_recording_name
                     images = sorted(
                         [
@@ -321,30 +376,52 @@ class RecordingMixin:
                         ]
                     )
 
-                    clip = ImageSequenceClip(images, fps=30)
-                    clip.write_videofile(
-                        f"{self._curr_user_recording_name}.mp4",
-                        codec="libx264",
-                        audio=False,
-                        threads=32,
-                        preset="veryfast",
-                        ffmpeg_params=[
-                            "-profile:v",
-                            "main",
-                            "-level",
-                            "4.0",
-                            "-pix_fmt",
-                            "yuv420p",
-                            "-movflags",
-                            "+faststart",
-                            "-crf",
-                            "23",
-                            "-x264-params",
-                            "keyint=60:min-keyint=30",
-                        ],
-                    )
+                    if self.headless:
+                        print(
+                            "Headless recording: skipped PNG/MP4 rendering; "
+                            "saving motion data only."
+                        )
+                    elif not images:
+                        # A viewer can fail to create a GLFW window (for
+                        # example when DISPLAY/WSLg is missing). Do not call
+                        # MoviePy with an empty sequence. Report the actual
+                        # rendering problem and leave the run debuggable.
+                        print(
+                            "Warning: video recording produced no PNG frames; "
+                            "check DISPLAY/WSLg and the IsaacLab GLFW logs."
+                        )
+                    else:
+                        try:
+                            from moviepy import ImageSequenceClip
+                        except ImportError:
+                            # MoviePy 1.x exposes clips through ``moviepy.editor``.
+                            from moviepy.editor import ImageSequenceClip
+
+                        clip = ImageSequenceClip(images, fps=30)
+                        clip.write_videofile(
+                            f"{self._curr_user_recording_name}.mp4",
+                            codec="libx264",
+                            audio=False,
+                            threads=32,
+                            preset="veryfast",
+                            ffmpeg_params=[
+                                "-profile:v",
+                                "main",
+                                "-level",
+                                "4.0",
+                                "-pix_fmt",
+                                "yuv420p",
+                                "-movflags",
+                                "+faststart",
+                                "-crf",
+                                "23",
+                                "-x264-params",
+                                "keyint=60:min-keyint=30",
+                            ],
+                        )
                     self._delete_user_viewer_recordings = True
-                    print(f"Video saved to {self._curr_user_recording_name}.mp4")
+                    if images:
+                        print(f"Video saved to {self._curr_user_recording_name}.mp4")
 
                     # Save the recorded motion as a .motion file
                     motion_data = build_motion_data(
@@ -352,29 +429,83 @@ class RecordingMixin:
                         fps=30,  # Video recording FPS
                         num_dof=self._num_dof,
                     )
+                    scene_offset = self._get_recording_scene_offset().to(
+                        motion_data["rigid_body_pos"]
+                    )
+                    if torch.any(scene_offset != 0):
+                        motion_data["rigid_body_pos"] -= scene_offset
+                        motion_data["coordinate_frame"] = "scene_local"
+                        motion_data["recording_world_offset"] = scene_offset.cpu()
                     motion_file_path = f"{self._curr_user_recording_name}.motion"
                     torch.save(motion_data, motion_file_path)
                     print(f"Motion saved to {motion_file_path}")
                     self._recorded_motion = None
 
+                    # A BaseEnv can expose the current reference pose as a
+                    # reserved marker stream.  Save it as an ordinary motion
+                    # file so Viser can overlay policy and synchronized GT.
+                    reference_frames = self._recorded_markers.get(
+                        "recording_reference_pose"
+                    )
+                    if reference_frames:
+                        reference_pos = torch.stack(
+                            [frame[0] for frame in reference_frames], dim=0
+                        )
+                        reference_rot = torch.stack(
+                            [frame[1] for frame in reference_frames], dim=0
+                        )
+                        if not self.config.w_last:
+                            # _update_markers converts xyzw to the backend's
+                            # wxyz convention in-place before recording.
+                            reference_rot = rotations.wxyz_to_xyzw(reference_rot)
+                        reference_pos = reference_pos - scene_offset.cpu()
+                        gt_motion_data = {
+                            "fps": 30,
+                            "rigid_body_pos": reference_pos,
+                            "rigid_body_rot": reference_rot,
+                            "coordinate_frame": "scene_local",
+                            "recording_world_offset": scene_offset.cpu(),
+                        }
+                        gt_motion_path = (
+                            f"{self._curr_user_recording_name}.gt.motion"
+                        )
+                        torch.save(gt_motion_data, gt_motion_path)
+                        print(
+                            "Synchronized reference motion saved to "
+                            f"{gt_motion_path}"
+                        )
+
                     # Save markers and objects files
                     try:
-                        if self._recorded_markers:
-                            markers_data = self._build_markers_save_data()
+                        save_sidecars = getattr(
+                            self.config, "save_recording_sidecars", True
+                        )
+                        if save_sidecars and self._recorded_markers:
+                            markers_data = self._build_markers_save_data(scene_offset)
+                            markers_data["coordinate_frame"] = "scene_local"
+                            markers_data["recording_world_offset"] = scene_offset.cpu()
                             markers_path = (
                                 f"{self._curr_user_recording_name}.markers.pt"
                             )
                             torch.save(markers_data, markers_path)
                             print(f"Markers saved to {markers_path}")
 
-                        if self._recorded_objects or self._recorded_projectiles:
-                            objects_data = self._build_objects_save_data()
+                        if save_sidecars and (
+                            self._recorded_objects or self._recorded_projectiles
+                        ):
+                            objects_data = self._build_objects_save_data(scene_offset)
+                            objects_data["coordinate_frame"] = "scene_local"
+                            objects_data["recording_world_offset"] = scene_offset.cpu()
                             objects_path = (
                                 f"{self._curr_user_recording_name}.objects.pt"
                             )
                             torch.save(objects_data, objects_path)
                             print(f"Objects saved to {objects_path}")
-                        terrain_data = self._build_terrain_save_data()
+                        terrain_data = (
+                            self._build_terrain_save_data()
+                            if save_sidecars
+                            else None
+                        )
                         if terrain_data is not None:
                             terrain_path = (
                                 f"{self._curr_user_recording_name}.terrain.pt"
@@ -392,11 +523,12 @@ class RecordingMixin:
 
             # Capture frame if recording
             if self._user_is_recording:
-                file_name = (
-                    self._curr_user_recording_name
-                    + "/%04d.png" % self._user_recording_frame
-                )
-                self._write_viewport_to_file(file_name)
+                if not self.headless:
+                    file_name = (
+                        self._curr_user_recording_name
+                        + "/%04d.png" % self._user_recording_frame
+                    )
+                    self._write_viewport_to_file(file_name)
                 self._user_recording_frame += 1
 
                 eid = self._recording_env_id
@@ -431,9 +563,12 @@ class RecordingMixin:
                     )
 
                 # Record markers (single env only, skip terrain markers)
+                save_sidecars = getattr(self.config, "save_recording_sidecars", True)
                 if self._last_markers_state:
                     for name, ms in self._last_markers_state.items():
                         if name == "terrain_markers":
+                            continue
+                        if not save_sidecars and name != "recording_reference_pose":
                             continue
                         if name not in self._recorded_markers:
                             self._recorded_markers[name] = []
@@ -448,6 +583,7 @@ class RecordingMixin:
                 if (
                     self.scene_lib is not None
                     and self.scene_lib.num_objects_per_scene > 0
+                    and (save_sidecars or not self._recorded_objects)
                 ):
                     obj_state = self.get_object_root_state()
                     self._recorded_objects.append(
@@ -459,6 +595,8 @@ class RecordingMixin:
 
                 # Record projectiles (single env only)
                 if (
+                    save_sidecars
+                    and
                     self._proj_config is not None
                     and self._proj_config.num_projectiles > 0
                 ):

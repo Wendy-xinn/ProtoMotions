@@ -4,7 +4,7 @@
 import os
 from pathlib import Path
 import pickle
-from typing import List
+from typing import List, Optional
 
 import yaml
 import numpy as np
@@ -83,6 +83,25 @@ def load_motion_configs(yaml_files):
     return motion_timings
 
 
+def normalized_motion_filename(filename: Path) -> str:
+    """Return the filename used by ProtoMotions for a converted motion."""
+    return (
+        filename.name.replace(".npz", ".motion")
+        .replace(".pkl", ".motion")
+        .replace("-", "_")
+        .replace(" ", "_")
+        .replace("(", "_")
+        .replace(")", "_")
+    )
+
+
+def motion_key_for_file(folder_name: str, data_dir: Path, filename: Path) -> str:
+    """Build the normalized relative key used in AMASS split YAML files."""
+    relative_path = filename.relative_to(data_dir)
+    relative_motion = relative_path.parent / normalized_motion_filename(filename)
+    return str(Path(folder_name) / relative_motion)
+
+
 def slice_motion_data(pose_aa, amass_trans, start_time, end_time, fps):
     """Slice motion data based on start and end times."""
     if start_time == 0.0 and end_time is None:
@@ -114,6 +133,8 @@ def convert_amass_to_motion(
     kinematic_info,
     device,
     dtype,
+    fix_height: bool = True,
+    compute_ground_contacts: bool = True,
 ):
     """
     Convert AMASS motion data to processed motion object.
@@ -231,15 +252,17 @@ def convert_amass_to_motion(
     # because we know all joints are 3 dof exp_map joints...
     motion.dof_vel = local_angular_vels.reshape(-1, n_j * 3)
 
-    motion.fix_height(height_offset=foot_offsets_dict[humanoid_type])
+    if fix_height:
+        motion.fix_height(height_offset=foot_offsets_dict[humanoid_type])
 
     # compute contacts using position and velocity thresholds
-    motion.rigid_body_contacts = compute_contact_labels_from_pos_and_vel(
-        positions=motion.rigid_body_pos,
-        velocity=motion.rigid_body_vel,
-        vel_thres=0.15,
-        height_thresh=0.1,
-    ).to(torch.bool)
+    if compute_ground_contacts:
+        motion.rigid_body_contacts = compute_contact_labels_from_pos_and_vel(
+            positions=motion.rigid_body_pos,
+            velocity=motion.rigid_body_vel,
+            vel_thres=0.15,
+            height_thresh=0.1,
+        ).to(torch.bool)
 
     return motion, current_output_fps
 
@@ -295,6 +318,19 @@ def main(
     humanoid_type: str = "smpl",
     force_remake: bool = False,
     output_fps: int = 30,
+    output_root_dir: Optional[Path] = typer.Option(
+        None,
+        "--output-root-dir",
+        help=(
+            "Root for converted .motion files. Defaults to writing beside the raw "
+            "AMASS files for backward compatibility."
+        ),
+    ),
+    only_config_motions: bool = typer.Option(
+        False,
+        "--only-config-motions",
+        help="Convert only motions referenced by --motion-config YAML files.",
+    ),
     motion_configs: List[str] = typer.Option(
         None, "--motion-config", help="YAML files containing motion configurations"
     ),
@@ -307,6 +343,13 @@ def main(
     if motion_configs:
         motion_timings = load_motion_configs(motion_configs)
         print(f"Loaded timing configurations for {len(motion_timings)} motions")
+    if only_config_motions and not motion_timings:
+        raise ValueError("--only-config-motions requires at least one --motion-config")
+
+    amass_root_dir = amass_root_dir.resolve()
+    if output_root_dir is not None:
+        output_root_dir = output_root_dir.resolve()
+        output_root_dir.mkdir(parents=True, exist_ok=True)
 
     assert humanoid_type in [
         "smpl",
@@ -340,7 +383,7 @@ def main(
     )
 
     # Count total number of files that need processing
-    start_time = time.time()
+    conversion_start_time = time.time()
     total_files = 0
     total_files_to_process = 0
     processed_files = 0
@@ -348,13 +391,24 @@ def main(
         if "smpl" in folder_name:
             continue
         data_dir = amass_root_dir / folder_name
-        output_dir = amass_root_dir / f"{folder_name}"
+        output_dir = (
+            output_root_dir / folder_name
+            if output_root_dir is not None
+            else amass_root_dir / folder_name
+        )
 
         all_files_in_folder = [
             f
             for f in Path(data_dir).glob("**/*.[np][pk][lz]")
             if (f.name != "shape.npz" and "stagei.npz" not in f.name)
         ]
+        if only_config_motions:
+            all_files_in_folder = [
+                filename
+                for filename in all_files_in_folder
+                if motion_key_for_file(folder_name, data_dir, filename)
+                in motion_timings
+            ]
 
         if not force_remake:
             # Only count files that don't already have outputs
@@ -388,7 +442,11 @@ def main(
             continue
 
         data_dir = amass_root_dir / folder_name
-        output_dir = amass_root_dir / f"{folder_name}"
+        output_dir = (
+            output_root_dir / folder_name
+            if output_root_dir is not None
+            else amass_root_dir / folder_name
+        )
 
         print(f"Processing subset {folder_name}")
         os.makedirs(output_dir, exist_ok=True)
@@ -398,6 +456,13 @@ def main(
             for f in Path(data_dir).glob("**/*.[np][pk][lz]")
             if (f.name != "shape.npz" and "stagei.npz" not in f.name)
         ]
+        if only_config_motions:
+            files = [
+                filename
+                for filename in files
+                if motion_key_for_file(folder_name, data_dir, filename)
+                in motion_timings
+            ]
         print(f"Processing {len(files)} files")
 
         files.sort()
@@ -408,12 +473,7 @@ def main(
             outpath = (
                 output_dir
                 / relative_path_dir
-                / filename.name.replace(".npz", ".motion")
-                .replace(".pkl", ".motion")
-                .replace("-", "_")
-                .replace(" ", "_")
-                .replace("(", "_")
-                .replace(")", "_")
+                / normalized_motion_filename(filename)
             )
 
             # Check if the output file already exists
@@ -516,27 +576,22 @@ def main(
             # Check if this motion should be sliced based on YAML configs
             if motion_timings:
                 # Create motion key to match with YAML config
-                motion_relative_path = str(
-                    relative_path_dir
-                    / filename.name.replace(".npz", ".motion")
-                    .replace(".pkl", ".motion")
-                    .replace("-", "_")
-                    .replace(" ", "_")
-                    .replace("(", "_")
-                    .replace(")", "_")
-                )
-                motion_key = folder_name + "/" + motion_relative_path
+                motion_key = motion_key_for_file(folder_name, data_dir, filename)
 
                 if motion_key in motion_timings:
                     print(f"Found timing config for {motion_key}")
                     # Get the timing configuration
                     timing_config = motion_timings[motion_key]
-                    start_time = timing_config["start"]
-                    end_time = timing_config["end"]
+                    clip_start_time = timing_config["start"]
+                    clip_end_time = timing_config["end"]
 
                     # Slice the motion data
                     pose_aa, amass_trans = slice_motion_data(
-                        pose_aa, amass_trans, start_time, end_time, mocap_fr
+                        pose_aa,
+                        amass_trans,
+                        clip_start_time,
+                        clip_end_time,
+                        mocap_fr,
                     )
                 else:
                     print(f"No timing config found for {motion_key}")
@@ -557,7 +612,7 @@ def main(
             )
 
             processed_files += 1
-            elapsed_time = time.time() - start_time
+            elapsed_time = time.time() - conversion_start_time
             avg_time_per_file = elapsed_time / processed_files
             remaining_files = total_files_to_process - processed_files
             estimated_time_remaining = avg_time_per_file * remaining_files

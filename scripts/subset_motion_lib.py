@@ -7,11 +7,20 @@ Script to create a subset of a motion library by sampling every N motions.
 Might be useful if you realize your GPU cannot load large motion libraries.
 """
 
+import os
+
 import torch
 from pathlib import Path
 
 
-def subset_motion_lib(input_path: str, output_path: str, sample_every: int = 200):
+def subset_motion_lib(
+    input_path: str,
+    output_path: str,
+    sample_every: int = 200,
+    indices: list[int] | None = None,
+    frame_start: int | None = None,
+    frame_count: int | None = None,
+):
     """
     Load a motion library and create a subset by sampling every N motions.
     
@@ -27,10 +36,16 @@ def subset_motion_lib(input_path: str, output_path: str, sample_every: int = 200
     num_motions = len(data["motion_lengths"])
     print(f"Original motion library has {num_motions} motions")
     
-    # Select motion indices (every sample_every motions)
-    selected_indices = list(range(0, num_motions, sample_every))
+    # Select explicit motion indices when requested; otherwise retain the
+    # original every-N behaviour.
+    selected_indices = (
+        indices if indices is not None else list(range(0, num_motions, sample_every))
+    )
+    invalid = [idx for idx in selected_indices if idx < 0 or idx >= num_motions]
+    if invalid:
+        raise ValueError(f"Motion indices out of range [0, {num_motions}): {invalid}")
     num_selected = len(selected_indices)
-    print(f"Selecting {num_selected} motions (every {sample_every}th)")
+    print(f"Selecting {num_selected} motions: {selected_indices}")
     
     # Get the frame ranges for each selected motion
     length_starts = data["length_starts"]
@@ -47,10 +62,23 @@ def subset_motion_lib(input_path: str, output_path: str, sample_every: int = 200
     for idx in selected_indices:
         start = length_starts[idx].item()
         num_frames = motion_num_frames[idx].item()
+        local_start = 0 if frame_start is None else frame_start
+        if local_start < 0 or local_start >= num_frames:
+            raise ValueError(
+                f"frame_start {local_start} is outside motion {idx} with {num_frames} frames"
+            )
+        local_count = num_frames - local_start
+        if frame_count is not None:
+            if frame_count <= 1:
+                raise ValueError("frame_count must be greater than one")
+            local_count = min(local_count, frame_count)
+        start += local_start
+        num_frames = local_count
         frame_indices.extend(range(start, start + num_frames))
         new_motion_num_frames.append(num_frames)
-        new_motion_lengths.append(data["motion_lengths"][idx].item())
-        new_motion_dt.append(data["motion_dt"][idx].item())
+        dt = data["motion_dt"][idx].item()
+        new_motion_lengths.append((num_frames - 1) * dt)
+        new_motion_dt.append(dt)
         new_motion_weights.append(data["motion_weights"][idx].item())
         if "motion_files" in data:
             new_motion_files.append(data["motion_files"][idx])
@@ -88,7 +116,9 @@ def subset_motion_lib(input_path: str, output_path: str, sample_every: int = 200
     # Save
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(new_data, output_path)
+    temp_path = output_path.with_name(f".{output_path.name}.tmp.pt")
+    torch.save(new_data, temp_path)
+    os.replace(temp_path, output_path)
     
     print(f"\nSaved subset to {output_path}")
     print(f"  Motions: {num_motions} -> {num_selected}")
@@ -107,6 +137,21 @@ if __name__ == "__main__":
         default=200,
         help="Take every Nth motion (default: 200)",
     )
+    parser.add_argument("--frame-start", type=int, default=None)
+    parser.add_argument("--frame-count", type=int, default=None)
+    parser.add_argument(
+        "--indices",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Explicit zero-based motion indices; overrides --sample-every.",
+    )
     args = parser.parse_args()
-    subset_motion_lib(args.input, args.output, sample_every=args.sample_every)
-
+    subset_motion_lib(
+        args.input,
+        args.output,
+        sample_every=args.sample_every,
+        indices=args.indices,
+        frame_start=args.frame_start,
+        frame_count=args.frame_count,
+    )

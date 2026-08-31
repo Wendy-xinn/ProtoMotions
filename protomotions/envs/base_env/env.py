@@ -90,6 +90,7 @@ from protomotions.envs.base_env.utils import (
     combine_terminations,
 )
 from protomotions.components.pose_lib import build_body_ids_tensor
+from protomotions.utils import rotations
 
 from protomotions.robot_configs.base import RobotConfig
 
@@ -458,7 +459,53 @@ class BaseEnv:
         # Extract all params except "fn"
         params = {k: v for k, v in self.config.action_config.items() if k != "fn"}
         params["action"] = action
-        return fn(**params)
+        result = fn(**params)
+
+        global_gain = self.config.head_orientation_feedback_gain
+        if global_gain > 0.0:
+            if context.mimic is None:
+                raise RuntimeError(
+                    "head_orientation_feedback_gain requires a mimic Head target"
+                )
+            body_names = self.robot_config.kinematic_info.body_names
+            dof_names = self.robot_config.kinematic_info.dof_names
+            try:
+                parent_id = body_names.index("Neck2")
+                head_id = body_names.index("Head")
+            except ValueError as exc:
+                raise RuntimeError(
+                    "head_orientation_feedback_gain requires Neck2 and Head bodies"
+                ) from exc
+            head_dof_indices = [
+                i for i, name in enumerate(dof_names) if name.startswith("Head_")
+            ]
+            if len(head_dof_indices) != 3:
+                raise RuntimeError(
+                    "head_orientation_feedback_gain requires exactly 3 Head DOFs"
+                )
+
+            # Solve the local Head rotation that produces the requested world
+            # orientation under the *current simulated* parent orientation.
+            # This compensates upstream trunk/neck tracking error instead of
+            # assuming that replaying the reference local joint angle is enough.
+            desired_local = rotations.quat_mul(
+                rotations.quat_conjugate(
+                    context.current.rigid_body_rot[:, parent_id], w_last=True
+                ),
+                context.mimic.ref_state.rigid_body_rot[:, head_id],
+                w_last=True,
+            )
+            desired_head_dof = rotations.quat_to_exp_map(desired_local, w_last=True)
+            assisted = result["processed_action"].clone()
+            idx = torch.as_tensor(
+                head_dof_indices, dtype=torch.long, device=assisted.device
+            )
+            assisted[:, idx] = torch.lerp(
+                assisted[:, idx], desired_head_dof, global_gain
+            )
+            result["processed_action"] = assisted
+
+        return result
 
     ###############################################################
     # Cached Properties
@@ -658,13 +705,10 @@ class BaseEnv:
         Returns:
             Dictionary mapping marker names to MarkerState objects
         """
-        if self.simulator.headless:
-            return {}
-
         markers_state = {}
 
         # Update terrain markers
-        if self.config.show_terrain_markers:
+        if not self.simulator.headless and self.config.show_terrain_markers:
             height_maps = self.terrain.get_height_maps(
                 self.simulator.get_root_state(), None, return_all_dims=True
             ).view(self.num_envs, -1, 3)
@@ -675,9 +719,30 @@ class BaseEnv:
                 ),
             )
 
-        # Merge markers from control components
-        control_markers_state = self.control_manager.get_markers_state()
-        markers_state.update(control_markers_state)
+        if self.config.record_reference_motion and self.motion_manager is not None:
+            ref_state = self.motion_lib.get_motion_state(
+                self.motion_manager.motion_ids,
+                self.motion_manager.motion_times,
+            )
+            ref_pos = ref_state.rigid_body_pos.clone()
+            # Use the exact reset/spawn transform here, including
+            # ``ref_respawn_offset``.  The recorder later subtracts the live
+            # scene's complete XYZ world offset, returning this stream to the
+            # original motion/scene-local coordinate frame.  Recomputing only
+            # terrain correction here loses the 5 cm respawn clearance and
+            # makes the saved GT motion appear 5 cm too low.
+            ref_pos += self.respawn_root_offset[:, None, :]
+            markers_state["recording_reference_pose"] = MarkerState(
+                translation=ref_pos,
+                orientation=ref_state.rigid_body_rot.clone(),
+            )
+
+        # Rendering-only markers remain disabled headlessly. The synchronized
+        # reference stream above is recording data, not a visualization, and
+        # must still be exposed for headless .gt.motion sidecars.
+        if not self.simulator.headless:
+            control_markers_state = self.control_manager.get_markers_state()
+            markers_state.update(control_markers_state)
 
         return markers_state
 
@@ -1010,6 +1075,12 @@ class BaseEnv:
             ),
             dt=self.dt,
             progress_buf=self._select_context_tensor(self.progress_buf, env_ids),
+            motion_ids=self._select_context_tensor(
+                self.motion_manager.motion_ids, env_ids
+            ) if self.motion_manager is not None else None,
+            motion_times=self._select_context_tensor(
+                self.motion_manager.motion_times, env_ids
+            ) if self.motion_manager is not None else None,
             # Contact tracking
             contact_body_ids=self.contact_body_ids,
             non_termination_contact_body_ids=self.non_termination_contact_body_ids,
@@ -1110,17 +1181,26 @@ class BaseEnv:
         if num_objects_per_scene <= 0 or not has_object_pointclouds:
             object_pos = torch.zeros(context_num_envs, 0, 3, device=self.device)
             object_rot = torch.zeros(context_num_envs, 0, 4, device=self.device)
+            object_vel = torch.zeros(context_num_envs, 0, 3, device=self.device)
+            object_ang_vel = torch.zeros(context_num_envs, 0, 3, device=self.device)
             neutral_pointclouds = torch.zeros(
                 context_num_envs, 0, 0, 3, device=self.device
             )
+            neutral_pointcloud_normals = torch.zeros_like(neutral_pointclouds)
             object_valid_mask = torch.zeros(
                 context_num_envs, 0, dtype=torch.bool, device=self.device
             )
             return SceneSurfaceContext(
                 object_pos=object_pos,
                 object_rot=object_rot,
+                object_vel=object_vel,
+                object_ang_vel=object_ang_vel,
                 neutral_pointclouds=neutral_pointclouds,
                 object_valid_mask=object_valid_mask,
+                neutral_pointcloud_normals=neutral_pointcloud_normals,
+                object_bbox_extents=torch.zeros(context_num_envs, 0, 3, device=self.device),
+                object_static_mask=torch.zeros(context_num_envs, 0, dtype=torch.bool, device=self.device),
+                object_class_ids=torch.zeros(context_num_envs, 0, dtype=torch.long, device=self.device),
             )
 
         scene_env_ids = (
@@ -1132,8 +1212,14 @@ class BaseEnv:
         return SceneSurfaceContext(
             object_pos=object_state.root_pos,
             object_rot=object_state.root_rot,
+            object_vel=object_state.root_vel,
+            object_ang_vel=object_state.root_ang_vel,
             neutral_pointclouds=scene_lib.get_scene_neutral_pointcloud(scene_env_ids),
             object_valid_mask=scene_lib.get_per_object_valid_mask(scene_env_ids),
+            neutral_pointcloud_normals=scene_lib.get_scene_neutral_pointcloud_normals(scene_env_ids),
+            object_bbox_extents=scene_lib.get_object_bbox_extents(scene_env_ids),
+            object_static_mask=scene_lib.get_object_static_mask(scene_env_ids),
+            object_class_ids=scene_lib.get_object_class_ids(scene_env_ids),
         )
 
     def _build_global_context(self) -> EnvContext:
@@ -1762,6 +1848,19 @@ class BaseEnv:
                 type="sphere", color=(0.008, 0.345, 0.224), markers=terrain_markers
             )
             visualization_markers["terrain_markers"] = terrain_markers_cfg
+
+        if self.config.record_reference_motion:
+            reference_markers = [
+                MarkerConfig(size="small")
+                for _ in self.robot_config.kinematic_info.body_names
+            ]
+            visualization_markers["recording_reference_pose"] = (
+                VisualizationMarkerConfig(
+                    type="sphere",
+                    color=(0.1, 0.9, 0.1),
+                    markers=reference_markers,
+                )
+            )
 
         # Merge markers from control components
         control_markers = self.control_manager.create_visualization_markers(headless)

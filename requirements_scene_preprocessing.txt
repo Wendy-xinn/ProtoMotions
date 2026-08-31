@@ -1,0 +1,4 @@
+# Reproducible optional dependencies for TRUMANS/static-scene preprocessing.
+# Install into the environment used to run data/scripts, for example:
+#   IsaacLab/.venv/bin/python -m pip install -r requirements_scene_preprocessing.txt
+fast-simplification==0.1.13

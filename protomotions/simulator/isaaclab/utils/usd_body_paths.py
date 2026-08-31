@@ -153,6 +153,41 @@ def resolve_articulation_root_prim_path(
     )
 
 
+def resolve_rigid_body_prim_path(
+    usd_path: str,
+    *,
+    stage_factory=None,
+) -> str:
+    """Resolve the sole rigid-body prim path relative to the USD pseudo-root.
+
+    Scene assets are referenced below a SceneLib object container. Unlike robot
+    body paths, their USD default prim remains a child of that container. For a
+    USD rigid body at ``/Root`` this function therefore returns ``"Root"``.
+
+    Args:
+        usd_path: Path to the USD file.
+        stage_factory: Optional injectable stage factory for tests.
+
+    Returns:
+        Rigid-body prim path without a leading slash.
+
+    Raises:
+        ValueError: If the USD does not contain exactly one rigid body.
+    """
+    records, _ = _stage_records(usd_path, stage_factory)
+    paths = [
+        str(record["full_path"]).lstrip("/")
+        for record in records
+        if bool(record.get("is_rigid_body", False))
+    ]
+    if len(paths) != 1:
+        raise ValueError(
+            f"Expected exactly one rigid body in scene asset {usd_path!r}, "
+            f"found {len(paths)}: {paths}"
+        )
+    return paths[0]
+
+
 def resolve_robot_prim_paths(
     usd_path: str,
     body_names: List[str],

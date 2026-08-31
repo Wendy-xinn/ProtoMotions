@@ -74,6 +74,30 @@ def create_parser():
         help="Run full evaluation instead of simple inference",
     )
     parser.add_argument(
+        "--fixed-motion-eval-batch-size",
+        type=int,
+        default=None,
+        help="Evaluate fixed motions in smaller batches for stable PhysX comparisons.",
+    )
+    parser.add_argument(
+        "--policy-observation-intervention",
+        choices=("none", "zero", "shuffle"),
+        default="none",
+        help="Intervene on selected policy observations during full evaluation.",
+    )
+    parser.add_argument(
+        "--disable-scene-adapter",
+        action="store_true",
+        default=False,
+        help="Set the scene residual actor gain to zero for a motion-only ablation.",
+    )
+    parser.add_argument(
+        "--policy-observation-intervention-keys",
+        nargs="+",
+        default=None,
+        help="Observation keys affected by --policy-observation-intervention.",
+    )
+    parser.add_argument(
         "--headless",
         action="store_true",
         default=False,
@@ -96,7 +120,28 @@ def create_parser():
         help="Path to motion file for inference. If not provided, will use the motion file from the checkpoint.",
     )
     parser.add_argument(
+        "--motion-id",
+        type=int,
+        default=None,
+        help=(
+            "Restrict a single-environment rollout to one motion inside the "
+            "motion file and reset it at time zero."
+        ),
+    )
+    parser.add_argument(
         "--scenes-file", type=str, default=None, help="Path to scenes file (optional)"
+    )
+    parser.add_argument(
+        "--scene-asset-root",
+        type=str,
+        default=None,
+        help="Asset root used to resolve relative object paths in --scenes-file.",
+    )
+    parser.add_argument(
+        "--ego-camera-file",
+        type=str,
+        default=None,
+        help="Packaged ego-camera trajectories aligned with --motion-file.",
     )
     parser.add_argument(
         "--overrides",
@@ -112,6 +157,111 @@ def create_parser():
             "Override task command sources for inference, e.g. "
             "target=keyboard. A bare value applies to the single target "
             "control component."
+        ),
+    )
+    parser.add_argument(
+        "--record-steps",
+        type=int,
+        default=0,
+        help=(
+            "Automatically record this many simulation steps and exit. Headless "
+            "runs save motion sidecars without PNG/MP4 output; files are written "
+            "under output/renderings."
+        ),
+    )
+    parser.add_argument(
+        "--record-sidecars",
+        action="store_true",
+        help=(
+            "Also save .markers.pt, .objects.pt, and .terrain.pt beside an "
+            "automatic motion recording. By default --record-steps saves only "
+            ".motion and synchronized .gt.motion; static scene geometry can be "
+            "reloaded from --scenes-file."
+        ),
+    )
+    parser.add_argument(
+        "--head-translation-only",
+        action="store_true",
+        help=(
+            "For masked-mimic checkpoints with a fixed Head condition, hide "
+            "the Head rotation and retain translation only."
+        ),
+    )
+    parser.add_argument(
+        "--free-scene-objects",
+        action="store_true",
+        help=(
+            "Disable kinematic scene-object reference replay during this rollout. "
+            "Dynamic objects then move only under physics/contact; static objects "
+            "remain fixed according to SceneLib."
+        ),
+    )
+    parser.add_argument(
+        "--oracle-target-tokens",
+        action="store_true",
+        help=(
+            "Bypass learned prior-token prediction and decode frozen FSQ tokens "
+            "obtained from the complete reference motion. This is a diagnostic "
+            "for retarget, tokenization, decoder, and physical tracking."
+        ),
+    )
+    parser.add_argument(
+        "--deterministic-tokens",
+        action="store_true",
+        help=(
+            "Decode the highest-probability student token at every autoregressive "
+            "step instead of sampling. This remains a closed-loop student rollout."
+        ),
+    )
+    parser.add_argument(
+        "--head-orientation-feedback-gain",
+        type=float,
+        default=0.0,
+        help=(
+            "Use the known offline ego Head orientation as world-space feedback, "
+            "converted to a local Head PD target using simulated Neck2."
+        ),
+    )
+    parser.add_argument(
+        "--record-target-tokens",
+        type=str,
+        default=None,
+        help=(
+            "Save the frozen target encoder's per-step packed FSQ tokens. "
+            "Requires --oracle-target-tokens and a finite --record-steps run."
+        ),
+    )
+    parser.add_argument(
+        "--offline-token-eval-cache",
+        type=str,
+        default=None,
+        help=(
+            "Evaluate teacher-forced and greedy-autoregressive token accuracy "
+            "on one offline SFT cache .pt file, then exit."
+        ),
+    )
+    parser.add_argument(
+        "--record-student-oracle-tokens",
+        type=str,
+        default=None,
+        help=(
+            "During student rollout, save predicted tokens and frozen-encoder "
+            "oracle tokens computed on the same current student state."
+        ),
+    )
+    parser.add_argument(
+        "--offline-token-eval-output",
+        type=str,
+        default=None,
+        help="Optional JSON output for --offline-token-eval-cache.",
+    )
+    parser.add_argument(
+        "--offline-token-eval-observations",
+        type=str,
+        default=None,
+        help=(
+            "Optional student rollout recording whose observations are substituted "
+            "into the offline cache one field at a time."
         ),
     )
 
@@ -142,6 +292,193 @@ from lightning.fabric import Fabric  # noqa: E402
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s: %(message)s")
 
 log = logging.getLogger(__name__)
+
+
+@torch.no_grad()
+def evaluate_offline_token_cache(
+    agent,
+    cache_path: str | Path,
+    observation_path: str | Path | None = None,
+) -> dict:
+    """Compare teacher-forced and free-prefix predictions on cached states."""
+    import json
+
+    import torch.nn.functional as F
+    from tensordict import TensorDict
+
+    from protomotions.agents.common.latent import LATENT_LOGITS_KEY, TARGET_LATENT_KEY
+
+    payload = torch.load(cache_path, map_location="cpu", weights_only=False)
+    tensors = payload["tensors"]
+    valid = tensors.get("valid")
+    valid_indices = (
+        torch.arange(next(iter(tensors.values())).shape[0])
+        if valid is None
+        else valid.bool().nonzero(as_tuple=False).squeeze(-1)
+    )
+    if valid_indices.numel() == 0:
+        raise ValueError(f"Offline token cache has no valid frames: {cache_path}")
+
+    model = agent.model
+    actor = getattr(model, "_actor", None)
+    prior_with_peft = getattr(actor, "prior_with_peft", None)
+    if actor is None or prior_with_peft is None:
+        raise ValueError("Offline token evaluation requires a PEFT discrete-prior model")
+
+    model.eval()
+    old_deterministic = prior_with_peft.deterministic_generation
+    prior_with_peft.deterministic_generation = True
+    batch_size = int(getattr(agent.config, "batch_size", 128))
+    target_batches = []
+    teacher_batches = []
+    autoregressive_batches = []
+    cross_entropy_sum = 0.0
+    try:
+        for start in range(0, valid_indices.numel(), batch_size):
+            frame_ids = valid_indices[start : start + batch_size]
+            batch = {}
+            for key, value in tensors.items():
+                if key in {"valid", "terminated", "motion_time"}:
+                    continue
+                value = value[frame_ids]
+                if value.is_floating_point():
+                    value = value.float()
+                batch[key] = value.to(agent.device)
+            td = TensorDict(batch, batch_size=frame_ids.numel(), device=agent.device)
+            target = td[TARGET_LATENT_KEY].long()
+
+            teacher_td = model(td.clone())
+            logits = teacher_td[LATENT_LOGITS_KEY]
+            teacher = logits.argmax(dim=-1)
+            cross_entropy_sum += float(
+                F.cross_entropy(
+                    logits.reshape(-1, logits.shape[-1]),
+                    target.reshape(-1),
+                    reduction="sum",
+                )
+            )
+
+            student_td = model.collect_student_rollout(td.clone())
+            autoregressive = student_td["prior_tokens"].long()
+            target_batches.append(target.cpu())
+            teacher_batches.append(teacher.cpu())
+            autoregressive_batches.append(autoregressive.cpu())
+    finally:
+        prior_with_peft.deterministic_generation = old_deterministic
+
+    target = torch.cat(target_batches)
+    teacher = torch.cat(teacher_batches)
+    autoregressive = torch.cat(autoregressive_batches)
+
+    def summarize(predicted: torch.Tensor) -> dict:
+        packed_correct = predicted.eq(target)
+        predicted_fsq = actor.prior_tokens_to_fsq_indices(predicted.to(agent.device)).cpu()
+        target_fsq = actor.prior_tokens_to_fsq_indices(target.to(agent.device)).cpu()
+        frame_exact = packed_correct.all(dim=-1)
+        mismatch = (~frame_exact).nonzero(as_tuple=False).squeeze(-1)
+        return {
+            "packed_token_accuracy": float(packed_correct.float().mean()),
+            "packed_token_accuracy_by_position": [
+                float(value) for value in packed_correct.float().mean(dim=0)
+            ],
+            "frame_exact_8_tokens": float(frame_exact.float().mean()),
+            "fsq_scalar_accuracy": float(predicted_fsq.eq(target_fsq).float().mean()),
+            "first_mismatch_valid_frame_index": (
+                None if mismatch.numel() == 0 else int(mismatch[0])
+            ),
+        }
+
+    report = {
+        "cache": str(Path(cache_path)),
+        "metadata": payload.get("metadata", {}),
+        "valid_frames": int(target.shape[0]),
+        "tokens_per_frame": int(target.shape[1]),
+        "teacher_forced": summarize(teacher),
+        "greedy_autoregressive_on_cached_state": summarize(autoregressive),
+        "teacher_forced_cross_entropy": cross_entropy_sum / target.numel(),
+    }
+
+    if observation_path is not None:
+        observation_payload = torch.load(
+            observation_path, map_location="cpu", weights_only=False
+        )
+        online_observations = observation_payload["observations"]
+        common_keys = [key for key in online_observations if key in tensors]
+        num_comparison_frames = min(
+            int(valid_indices.numel()),
+            min(int(online_observations[key].shape[0]) for key in common_keys),
+        )
+        comparison_frame_ids = valid_indices[:num_comparison_frames]
+        comparison_target = tensors[TARGET_LATENT_KEY][comparison_frame_ids].long()
+
+        def predict_with_online_keys(keys: list[str]) -> torch.Tensor:
+            predictions = []
+            for start in range(0, num_comparison_frames, batch_size):
+                end = min(start + batch_size, num_comparison_frames)
+                frame_ids = comparison_frame_ids[start:end]
+                batch = {}
+                for key, value in tensors.items():
+                    if key in {"valid", "terminated", "motion_time"}:
+                        continue
+                    value = value[frame_ids]
+                    if key in keys:
+                        value = online_observations[key][start:end]
+                    if value.is_floating_point():
+                        value = value.float()
+                    batch[key] = value.to(agent.device)
+                td = TensorDict(batch, batch_size=end - start, device=agent.device)
+                predictions.append(
+                    model.collect_student_rollout(td)["prior_tokens"].long().cpu()
+                )
+            return torch.cat(predictions)
+
+        def summarize_comparison(predicted: torch.Tensor) -> dict:
+            packed_correct = predicted.eq(comparison_target)
+            frame_exact = packed_correct.all(dim=-1)
+            return {
+                "packed_token_accuracy": float(packed_correct.float().mean()),
+                "packed_token_accuracy_by_position": [
+                    float(value) for value in packed_correct.float().mean(dim=0)
+                ],
+                "frame_exact_8_tokens": float(frame_exact.float().mean()),
+                "predicted_tokens_by_frame": predicted.tolist(),
+            }
+
+        old_deterministic = prior_with_peft.deterministic_generation
+        prior_with_peft.deterministic_generation = True
+        try:
+            substitutions = {
+                "cached_observations": summarize_comparison(
+                    predict_with_online_keys([])
+                )
+            }
+            for key in common_keys:
+                substitutions[f"online_{key}"] = summarize_comparison(
+                    predict_with_online_keys([key])
+                )
+            substitutions["all_online_observations"] = summarize_comparison(
+                predict_with_online_keys(common_keys)
+            )
+        finally:
+            prior_with_peft.deterministic_generation = old_deterministic
+
+        recorded_student = observation_payload.get("student_prior_tokens")
+        report["online_observation_counterfactual"] = {
+            "recording": str(Path(observation_path)),
+            "comparison_frames": num_comparison_frames,
+            "target_tokens_by_frame": comparison_target.tolist(),
+            "recorded_student": (
+                None
+                if recorded_student is None
+                else summarize_comparison(
+                    recorded_student[:num_comparison_frames].long()
+                )
+            ),
+            "substitutions": substitutions,
+        }
+    # Validate that the report remains JSON serializable before returning it.
+    json.dumps(report)
+    return report
 
 
 # def tmp_enable_domain_randomization(robot_cfg, simulator_cfg, env_cfg):
@@ -259,6 +596,36 @@ def main():
     env_config = resolved_configs["env"]
     agent_config = resolved_configs["agent"]
 
+    if args.motion_id is not None:
+        if args.num_envs != 1:
+            raise ValueError("--motion-id currently requires --num-envs 1")
+        if args.motion_id < 0:
+            raise ValueError("--motion-id must be non-negative")
+        env_config.motion_manager.subset_method = [args.motion_id]
+        env_config.motion_manager.init_start_prob = 1.0
+        log.info(
+            "Inference override: fixed motion_id=%d at time zero", args.motion_id
+        )
+
+    if args.free_scene_objects:
+        removed = []
+        for name, component in list(env_config.control_components.items()):
+            target = getattr(component, "_target_", "")
+            if target.endswith("SceneObjectReferenceControl"):
+                removed.append(name)
+                del env_config.control_components[name]
+        if not removed:
+            log.warning(
+                "--free-scene-objects requested, but the checkpoint has no "
+                "SceneObjectReferenceControl component"
+            )
+        else:
+            log.info(
+                "Inference override: disabled scene reference controls %s; "
+                "dynamic objects are free-running",
+                removed,
+            )
+
     # Check if we need to switch simulators
     # Extract simulator name from current config's _target_
     current_simulator = simulator_config._target_.split(
@@ -304,14 +671,36 @@ def main():
         scene_lib_config.scene_file = scenes_file
         if scenes_file is None:
             scene_lib_config.asset_root = None
-        # Recompute asset_root from the new scene file path (experiment's
-        # asset_root may point to a different machine, e.g. lustre vs local)
-        elif scene_lib_config.asset_root is not None:
-            import os
-
-            scene_lib_config.asset_root = os.path.dirname(
-                os.path.dirname(os.path.abspath(scenes_file))
+        elif args.scene_asset_root is not None:
+            scene_lib_config.asset_root = args.scene_asset_root
+        else:
+            # A CLI scene package replaces the checkpoint package, so its
+            # conventional ``<asset_root>/scenes/<file>`` root must replace the
+            # stale checkpoint root as well. Nonstandard layouts can pass the
+            # explicit --scene-asset-root override above.
+            scene_lib_config.asset_root = str(
+                Path(scenes_file).resolve().parent.parent
             )
+    elif args.scene_asset_root is not None:
+        scene_lib_config.asset_root = args.scene_asset_root
+
+    if args.ego_camera_file is not None:
+        from protomotions.envs.component_factories import (
+            load_ego_camera_trajectory_params,
+        )
+
+        component = env_config.observation_components.get(
+            "ego_visible_scene_pointcloud"
+        )
+        if component is None:
+            raise ValueError(
+                "--ego-camera-file requires the ego_visible_scene_pointcloud "
+                "observation component in the checkpoint config"
+            )
+        log.info(f"CLI override: ego_camera_file = {args.ego_camera_file}")
+        component.static_params.update(
+            load_ego_camera_trajectory_params(args.ego_camera_file)
+        )
 
     if args.headless is not None:
         log.info(f"CLI override: headless = {args.headless}")
@@ -340,6 +729,43 @@ def main():
     if args.command_source:
         log.info(f"CLI override: command_source = {args.command_source}")
         apply_command_source_overrides(env_config, args.command_source)
+
+    # Automatic recordings include an exactly synchronized full reference
+    # pose stream.  The viewer recorder writes it beside the rollout as
+    # ``<name>.gt.motion`` for direct Viser comparison.
+    if args.record_steps > 0:
+        env_config.record_reference_motion = True
+        # This inference-only attribute deliberately is not part of the
+        # serialized simulator config contract. RecordingMixin defaults to the
+        # legacy sidecar behaviour when the attribute is absent, while CLI
+        # automatic recordings are compact unless explicitly requested.
+        simulator_config.save_recording_sidecars = args.record_sidecars
+
+    if args.head_translation_only:
+        changed_head_condition = False
+        for component_config in env_config.control_components.values():
+            fixed_conditions = getattr(
+                component_config, "fixed_conditioning", None
+            )
+            for condition in fixed_conditions or []:
+                if condition.body_name == "Head":
+                    condition.constraint_state = 0
+                    changed_head_condition = True
+        if not changed_head_condition:
+            raise ValueError(
+                "--head-translation-only requires a fixed Head condition in "
+                "the checkpoint environment config"
+            )
+        log.info("Inference override: Head condition uses translation only")
+
+    if args.head_orientation_feedback_gain:
+        if not 0.0 <= args.head_orientation_feedback_gain <= 1.0:
+            raise ValueError("--head-orientation-feedback-gain must be in [0, 1]")
+        env_config.head_orientation_feedback_gain = args.head_orientation_feedback_gain
+        log.info(
+            "Inference: world Head orientation feedback gain = "
+            f"{args.head_orientation_feedback_gain}"
+        )
 
     motion_lib_config.validate()
 
@@ -442,6 +868,69 @@ def main():
 
     agent.setup()
     agent.load(args.checkpoint, load_env=False, load_training_state=False)
+    if args.fixed_motion_eval_batch_size is not None:
+        agent.evaluator.config.fixed_motion_eval_batch_size = (
+            args.fixed_motion_eval_batch_size
+        )
+    if args.disable_scene_adapter:
+        actor = getattr(agent.model, "_actor", None)
+        scene_gate = getattr(actor, "scene_gate", None)
+        if scene_gate is None:
+            raise ValueError(
+                "--disable-scene-adapter requires an actor with scene_gate"
+            )
+        with torch.no_grad():
+            scene_gate.zero_()
+        log.info("Inference ablation: disabled scene residual actor adapter")
+    if args.policy_observation_intervention != "none":
+        agent.evaluator.config.policy_observation_intervention = (
+            args.policy_observation_intervention
+        )
+        if args.policy_observation_intervention_keys is not None:
+            agent.evaluator.config.policy_observation_intervention_keys = (
+                args.policy_observation_intervention_keys
+            )
+        log.info(
+            "Inference evaluator policy intervention: %s on %s",
+            args.policy_observation_intervention,
+            agent.evaluator.config.policy_observation_intervention_keys,
+        )
+    if args.deterministic_tokens:
+        actor = getattr(agent.model, "_actor", None)
+        prior_with_peft = getattr(actor, "prior_with_peft", None)
+        if prior_with_peft is None:
+            raise ValueError(
+                "--deterministic-tokens requires a PEFT discrete-prior checkpoint"
+            )
+        prior_with_peft.deterministic_generation = True
+        log.info("Inference override: using deterministic greedy student tokens")
+    if args.oracle_target_tokens:
+        if not hasattr(agent.model, "collect_expert_rollout"):
+            raise ValueError(
+                "--oracle-target-tokens requires a checkpoint model that defines "
+                "collect_expert_rollout()."
+            )
+        agent.evaluator.use_expert_rollout = True
+        log.info("Inference override: using oracle target FSQ tokens")
+    if args.record_target_tokens is not None:
+        if not args.oracle_target_tokens:
+            raise ValueError("--record-target-tokens requires --oracle-target-tokens")
+        if args.record_steps <= 0:
+            raise ValueError("--record-target-tokens requires --record-steps > 0")
+        agent.evaluator.target_token_record_path = args.record_target_tokens
+    if args.record_student_oracle_tokens is not None:
+        if args.oracle_target_tokens:
+            raise ValueError(
+                "--record-student-oracle-tokens cannot be combined with "
+                "--oracle-target-tokens"
+            )
+        if args.record_steps <= 0:
+            raise ValueError(
+                "--record-student-oracle-tokens requires --record-steps > 0"
+            )
+        agent.evaluator.student_oracle_token_record_path = (
+            args.record_student_oracle_tokens
+        )
     headless = getattr(env.simulator, "headless", True)
     ui = getattr(env.simulator, "user_interface", None)
     if not headless and ui is not None:
@@ -450,7 +939,22 @@ def main():
             log.info("Viewer keybinds:\n%s", help_text)
 
     try:
-        if args.full_eval:
+        if args.offline_token_eval_cache is not None:
+            import json
+
+            report = evaluate_offline_token_cache(
+                agent,
+                args.offline_token_eval_cache,
+                args.offline_token_eval_observations,
+            )
+            rendered = json.dumps(report, indent=2)
+            print(rendered)
+            if args.offline_token_eval_output is not None:
+                output_path = Path(args.offline_token_eval_output)
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_text(rendered + "\n", encoding="utf-8")
+                log.info("Saved offline token evaluation to %s", output_path)
+        elif args.full_eval:
             agent.evaluator.eval_count = 0
             evaluation_log, evaluated_score, num_eval_items = (
                 agent.evaluator.evaluate()
@@ -468,7 +972,14 @@ def main():
                 print(f"  Overall Score: {evaluated_score:.6f}")
             print("=" * 60 + "\n")
         else:
-            agent.evaluator.simple_test_policy(collect_metrics=True)
+            if args.record_steps > 0:
+                agent.evaluator.simple_test_policy(
+                    collect_metrics=True,
+                    max_steps=args.record_steps,
+                    auto_record=True,
+                )
+            else:
+                agent.evaluator.simple_test_policy(collect_metrics=True)
     finally:
         # Ensure simulator viewer is properly closed (prevents hangs)
         if hasattr(env.simulator, "shutdown"):

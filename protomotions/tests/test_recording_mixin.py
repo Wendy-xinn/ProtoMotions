@@ -85,6 +85,9 @@ def test_recording_state_toggles_camera_and_marker_visibility(tmp_path, monkeypa
     assert recorder._camera_target == {"env": 1, "element": 0}
 
     recorder.config.w_last = False
+    recorder._original_marker_configs = {
+        "target": VisualizationMarkerConfig(markers=[MarkerConfig()])
+    }
     marker = {
         "target": MarkerState(
             translation=torch.ones(2, 3),
@@ -99,6 +102,19 @@ def test_recording_state_toggles_camera_and_marker_visibility(tmp_path, monkeypa
     assert torch.equal(updated.translation, torch.full((2, 3), -1000000.0))
     recorder._update_markers({})
     assert len(recorder.updated_markers) == 1
+
+    data_only = {
+        "recording_reference_pose": MarkerState(
+            translation=torch.ones(2, 3),
+            orientation=_identity_quat(2),
+        )
+    }
+    recorder._update_markers(data_only)
+    assert len(recorder.updated_markers) == 1
+    assert torch.equal(
+        data_only["recording_reference_pose"].translation,
+        torch.ones(2, 3),
+    )
 
 
 def test_recording_builds_marker_terrain_and_object_save_payloads(monkeypatch):
@@ -275,6 +291,31 @@ def test_render_start_capture_finalize_and_cleanup_paths(tmp_path, monkeypatch):
     assert (tmp_path / "finish.motion").exists()
     assert recorder._recorded_motion is None
     assert recorder._delete_user_viewer_recordings is False
+
+
+def test_headless_render_records_motion_without_viewport(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    recorder = _Recorder()
+    recorder.headless = True
+    recorder._init_recording_state()
+
+    recorder._toggle_video_record()
+    recorder.render()
+
+    assert recorder.written_files == []
+    assert recorder._user_recording_frame == 1
+    assert len(recorder._recorded_motion["gts"]) == 1
+
+    recorder.scene_lib = None
+    recorder._toggle_video_record()
+    recorder.render()
+
+    recordings = list((tmp_path / "output" / "renderings").glob("unit-*.motion"))
+    assert len(recordings) == 1
+    assert not list((tmp_path / "output" / "renderings").glob("unit-*.mp4"))
+    saved = torch.load(recordings[0], map_location="cpu", weights_only=False)
+    assert saved["rigid_body_pos"].shape == (1, 2, 3)
+    assert recorder.written_files == []
 
 
 def test_render_finalize_saves_marker_object_and_terrain_sidecars(

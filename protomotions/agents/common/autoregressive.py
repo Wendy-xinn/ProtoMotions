@@ -456,6 +456,7 @@ class DiscreteAutoregressiveTransformer(ProtoMotionsTensorDictModule):
         temperature: float = 1.0,
         top_p: float = 0.9,
         prior_constraint=None,
+        greedy: bool = False,
     ) -> TensorDict:
         was_training = self.training
         self.eval()
@@ -467,6 +468,7 @@ class DiscreteAutoregressiveTransformer(ProtoMotionsTensorDictModule):
                 temperature=temperature,
                 top_p=top_p,
                 prior_constraint=prior_constraint,
+                greedy=greedy,
             )
         finally:
             self.train(was_training)
@@ -511,6 +513,7 @@ class DiscreteAutoregressiveTransformer(ProtoMotionsTensorDictModule):
         temperature: float = 1.0,
         top_p: float = 0.9,
         prior_constraint=None,
+        greedy: bool = False,
         transformer: Optional[nn.Module] = None,
         pos_emb: Optional[torch.Tensor] = None,
         transformer_kwargs: Optional[dict] = None,
@@ -545,7 +548,10 @@ class DiscreteAutoregressiveTransformer(ProtoMotionsTensorDictModule):
                     p=top_p,
                     temperature=temperature,
                 )
-            next_idx = torch.multinomial(logp.exp(), 1).squeeze(-1)
+            if greedy:
+                next_idx = logp.argmax(dim=-1)
+            else:
+                next_idx = torch.multinomial(logp.exp(), 1).squeeze(-1)
 
             all_logps.append(logp.gather(-1, next_idx.unsqueeze(-1)).squeeze(-1))
             generated.append(next_idx)

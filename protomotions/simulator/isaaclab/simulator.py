@@ -173,6 +173,8 @@ class IsaacLabSimulator(Simulator):
             SceneCfg: The constructed scene configuration.
         """
         scene_cfgs = None
+        self._body_contact_filter_paths = None
+        self.body_contact_object_filter_offset = 1 if self.terrain is not None else 0
         if self.scene_lib.num_scenes() > 0:
             scene_cfgs, self._initial_scene_pos = self._preprocess_object_playground()
 
@@ -182,6 +184,7 @@ class IsaacLabSimulator(Simulator):
             num_envs=self.config.num_envs,
             env_spacing=2.0,
             scene_cfgs=scene_cfgs,
+            body_contact_filter_paths=self._body_contact_filter_paths,
             terrain=self.terrain,
             projectile_config=self._proj_config,
             replicate_physics=scene_cfgs
@@ -213,6 +216,7 @@ class IsaacLabSimulator(Simulator):
         objects_cfgs = []
         for _ in range(self.scene_lib.num_objects_per_scene):
             objects_cfgs.append([])
+        body_contact_filter_paths = [None] * self.scene_lib.num_objects_per_scene
 
         for env_id, scene in enumerate(self.scene_lib.scenes):
             for obj_idx, obj in enumerate(scene.objects):
@@ -241,6 +245,24 @@ class IsaacLabSimulator(Simulator):
                     asset_path = asset_path.resolve()
                     mass_props = self._mass_props_from_options(object_options)
 
+                    # TRUMANS retains OBJ paths in SceneLib for observation and
+                    # visualization, while PhysX must spawn the sibling USD with
+                    # a rigid-body root and convex collision. Passing OBJ to
+                    # UsdFileCfg silently creates a plain Xform and later makes
+                    # contact-sensor activation fail.
+                    if asset_path.suffix.lower() in (".obj", ".urdf"):
+                        prepared_collision = asset_path.with_name(
+                            f"{asset_path.stem}.collision_cd_h16_v64_r100000.usd"
+                        )
+                        if not prepared_collision.exists():
+                            raise FileNotFoundError(
+                                "Prepared collision USD is missing for "
+                                f"{asset_path}: expected {prepared_collision}. "
+                                "Run scripts/train_trumans_scene_sharded.sh to "
+                                "complete the collision-asset preflight."
+                            )
+                        asset_path = prepared_collision
+
                     # Pre-bake collision approximation into the USD asset
                     approx = self.scene_lib.config.mesh_collision_approximation
                     if approx is not None:
@@ -268,6 +290,11 @@ class IsaacLabSimulator(Simulator):
                             metallic=0.2,
                         ),
                     )
+                    # MultiAssetSpawnerCfg promotes the referenced USD default
+                    # rigid body to the SceneLib object prim itself. The
+                    # filter therefore targets Object_i, not the source USD's
+                    # internal /Root path.
+                    rigid_relative_path = ""
                 elif isinstance(obj, BoxSceneObject):
                     mass_props = self._mass_props_from_options(object_options)
                     spawn_cfg = sim_utils.CuboidCfg(
@@ -280,6 +307,7 @@ class IsaacLabSimulator(Simulator):
                         mass_props=mass_props,
                         collision_props=collision_props,
                     )
+                    rigid_relative_path = ""
                 elif isinstance(obj, SphereSceneObject):
                     mass_props = self._mass_props_from_options(object_options)
                     spawn_cfg = sim_utils.SphereCfg(
@@ -292,6 +320,7 @@ class IsaacLabSimulator(Simulator):
                         mass_props=mass_props,
                         collision_props=collision_props,
                     )
+                    rigid_relative_path = ""
                 elif isinstance(obj, CylinderSceneObject):
                     mass_props = self._mass_props_from_options(object_options)
                     spawn_cfg = sim_utils.CylinderCfg(
@@ -305,11 +334,21 @@ class IsaacLabSimulator(Simulator):
                         mass_props=mass_props,
                         collision_props=collision_props,
                     )
+                    rigid_relative_path = ""
                 else:
                     raise ValueError(f"Unsupported object type: {type(obj)}")
 
                 objects_cfgs[obj_idx].append(spawn_cfg)
+                previous_path = body_contact_filter_paths[obj_idx]
+                if previous_path is not None and previous_path != rigid_relative_path:
+                    raise ValueError(
+                        "All assets assigned to one SceneLib object slot must use the "
+                        "same rigid-body prim path for filtered contacts: "
+                        f"slot {obj_idx} has {previous_path!r} and {rigid_relative_path!r}."
+                    )
+                body_contact_filter_paths[obj_idx] = rigid_relative_path
 
+        self._body_contact_filter_paths = body_contact_filter_paths
         return objects_cfgs, initial_obj_pos
 
     @staticmethod
@@ -672,6 +711,32 @@ class IsaacLabSimulator(Simulator):
                     init_object_root_state[:, object_idx], env_ids
                 )
 
+    def _set_simulator_object_root_state(
+        self,
+        object_state: ObjectState,
+        env_ids: torch.Tensor,
+        object_mask: torch.Tensor = None,
+    ) -> None:
+        state = torch.cat(
+            [
+                object_state.root_pos,
+                object_state.root_rot,
+                object_state.root_vel,
+                object_state.root_ang_vel,
+            ],
+            dim=-1,
+        )
+        if object_mask is None:
+            object_mask = torch.ones(
+                state.shape[:2], dtype=torch.bool, device=state.device
+            )
+        for object_idx, rigid_object in enumerate(self._object):
+            selected = object_mask[:, object_idx]
+            if selected.any():
+                rigid_object.write_root_state_to_sim(
+                    state[selected, object_idx], env_ids=env_ids[selected]
+                )
+
     # =====================================================
     # Group 4: State Getters
     # =====================================================
@@ -837,6 +902,52 @@ class IsaacLabSimulator(Simulator):
             rigid_body_contact_forces=rigid_body_contact_forces,
             state_conversion=StateConversion.SIMULATOR,
         )
+
+    def get_body_filtered_contact_forces(
+        self, env_ids: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """Return per-body forces against configured filter partners [N].
+
+        The returned tensor has shape ``[num_envs, num_bodies,
+        num_filter_partners, 3]`` in common body order. Filter-partner order is
+        the order used to construct ``ContactSensorCfg.filter_prim_paths_expr``:
+        terrain first, followed by SceneLib object slots.
+
+        Args:
+            env_ids: Optional environment indices.
+
+        Returns:
+            Filtered normal contact force vectors [N].
+
+        Raises:
+            RuntimeError: If filtered body contact matrices were not enabled.
+        """
+        if not self.config.enable_body_contact_filter_matrix:
+            raise RuntimeError(
+                "Filtered body contact matrices are disabled; set "
+                "enable_body_contact_filter_matrix=True before simulator creation."
+            )
+
+        force_by_body = []
+        for body_name in self._body_names:
+            sensor = self._contact_sensor_map.get(body_name)
+            if sensor is None or sensor.data.force_matrix_w is None:
+                raise RuntimeError(
+                    f"Filtered contact force matrix is unavailable for body {body_name!r}."
+                )
+            matrix = wp.to_torch(sensor.data.force_matrix_w).clone()
+            if matrix.shape[1] != 1:
+                raise RuntimeError(
+                    f"Expected one sensor body for {body_name!r}, got {matrix.shape}."
+                )
+            force_by_body.append(matrix[:, 0])
+
+        # Sensors are iterated in ``self._body_names``, which is already the
+        # common semantic ordering rather than the backend articulation order.
+        forces = torch.stack(force_by_body, dim=1)
+        if env_ids is not None:
+            forces = forces[env_ids]
+        return forces
 
     def _get_simulator_object_contact_buf(
         self,

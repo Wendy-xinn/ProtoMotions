@@ -3,7 +3,7 @@
 
 """Configuration classes for evaluators."""
 
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 from dataclasses import dataclass, field
 
 from protomotions.envs.mdp_component import MdpComponent
@@ -26,6 +26,8 @@ class EvaluatorConfig:
         default=200,
         metadata={"help": "Evaluate metrics every N epochs. None = disabled.", "min": 1}
     )
+    policy_observation_intervention: str = "none"
+    policy_observation_intervention_keys: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -51,6 +53,7 @@ class MimicEvaluatorConfig(EvaluatorConfig):
     """Configuration for Mimic evaluator."""
 
     _target_: str = "protomotions.agents.evaluators.mimic_evaluator.MimicEvaluator"
+    fixed_motion_eval_batch_size: Optional[int] = None
     save_predicted_motion_lib_every: Optional[int] = field(
         default=3,
         metadata={"help": "Save pred_motion_lib every M evals. None = disabled.", "min": 1}

@@ -276,6 +276,67 @@ def test_policy_action_prefers_mean_action_and_falls_back_to_action(tmp_path):
     assert evaluator._policy_action(None) is sampled_action
 
 
+def test_policy_action_can_decode_oracle_target_tokens(tmp_path):
+    env = _Env()
+    agent = _Agent(env, tmp_path)
+    evaluator = BaseEvaluator(agent, _Fabric(), _config())
+    student_action = torch.zeros(2, 1)
+    expert_action = torch.ones(2, 1)
+
+    class Model:
+        def __call__(self, obs_td):
+            return {"mean_action": student_action}
+
+        def collect_expert_rollout(self, obs_td):
+            return {"mean_action": expert_action}
+
+    agent.model = Model()
+    evaluator.use_expert_rollout = True
+
+    assert evaluator._policy_action(None) is expert_action
+
+
+def test_policy_action_records_oracle_target_tokens(tmp_path):
+    env = _Env()
+    agent = _Agent(env, tmp_path)
+    evaluator = BaseEvaluator(agent, _Fabric(), _config())
+    target_latent = torch.tensor([[2, 4], [6, 8]])
+
+    class Model:
+        def collect_expert_rollout(self, obs_td):
+            return {
+                "mean_action": torch.ones(2, 1),
+                "target_latent": target_latent,
+            }
+
+    agent.model = Model()
+    evaluator.use_expert_rollout = True
+    evaluator.target_token_record_path = str(tmp_path / "tokens.pt")
+
+    evaluator._policy_action(None)
+
+    assert len(evaluator._recorded_target_tokens) == 1
+    assert torch.equal(evaluator._recorded_target_tokens[0], target_latent[0])
+
+
+def test_policy_action_uses_explicit_student_rollout_before_sft_forward(tmp_path):
+    env = _Env()
+    agent = _Agent(env, tmp_path)
+    evaluator = BaseEvaluator(agent, _Fabric(), _config())
+    student_action = torch.zeros(2, 1)
+
+    class SFTLikeModel:
+        def __call__(self, obs_td):
+            raise AssertionError("teacher-forced SFT forward must not drive inference")
+
+        def collect_student_rollout(self, obs_td):
+            return {"mean_action": student_action}
+
+    agent.model = SFTLikeModel()
+
+    assert evaluator._policy_action(None) is student_action
+
+
 def test_default_episode_hooks_are_noops_and_check_short_circuits_without_component_manager(
     tmp_path,
 ):

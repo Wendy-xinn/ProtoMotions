@@ -45,7 +45,7 @@ DEFAULT_PRIMITIVE_DENSITY: float = DEFAULT_OBJECT_DENSITY
 
 
 def _sample_mesh_pointcloud(
-    object_path: str, num_samples: int
+    object_path: str, num_samples: int, seed: Optional[int] = None
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Sample pointcloud from a mesh file (module-level for multiprocessing).
 
@@ -61,21 +61,15 @@ def _sample_mesh_pointcloud(
     """
     from protomotions.utils.mesh_utils import as_mesh
 
-    obj_path = (
-        object_path.replace(".urdf", ".obj")
-        .replace(".usda", ".obj")
-        .replace(".usd", ".obj")
-    )
-    stl_path = (
-        object_path.replace(".urdf", ".stl")
-        .replace(".usda", ".stl")
-        .replace(".usd", ".stl")
-    )
-    ply_path = (
-        object_path.replace(".urdf", ".ply")
-        .replace(".usda", ".ply")
-        .replace(".usd", ".ply")
-    )
+    source_stem = os.path.splitext(object_path)[0]
+    # Collision-baked assets use names such as
+    # ``chair.collision_cd_h16_v64_r100000.usd`` while their observation mesh
+    # remains ``chair.obj``. Strip the bake tag before resolving that source.
+    if ".collision_" in source_stem:
+        source_stem = source_stem.split(".collision_", 1)[0]
+    obj_path = source_stem + ".obj"
+    stl_path = source_stem + ".stl"
+    ply_path = source_stem + ".ply"
 
     if os.path.exists(obj_path):
         mesh_path = obj_path
@@ -89,13 +83,25 @@ def _sample_mesh_pointcloud(
         )
 
     mesh = as_mesh(trimesh.load_mesh(mesh_path))
-    point_cloud_np, face_indices = trimesh.sample.sample_surface_even(mesh, num_samples)
+    if seed is None:
+        point_cloud_np, face_indices = trimesh.sample.sample_surface_even(
+            mesh, num_samples
+        )
+    else:
+        point_cloud_np, face_indices = trimesh.sample.sample_surface_even(
+            mesh, num_samples, seed=seed
+        )
 
     if point_cloud_np.shape[0] < num_samples:
         missing_points = num_samples - point_cloud_np.shape[0]
-        extra_points_np, extra_face_indices = trimesh.sample.sample_surface(
-            mesh, missing_points
-        )
+        if seed is None:
+            extra_points_np, extra_face_indices = trimesh.sample.sample_surface(
+                mesh, missing_points
+            )
+        else:
+            extra_points_np, extra_face_indices = trimesh.sample.sample_surface(
+                mesh, missing_points, seed=seed + 1
+            )
         point_cloud_np = np.concatenate([point_cloud_np, extra_points_np], axis=0)
         face_indices = np.concatenate([face_indices, extra_face_indices], axis=0)
 
@@ -1048,6 +1054,21 @@ class SceneLibConfig:
             "help": "Number of pointcloud samples per object for observations. None to disable."
         },
     )
+    pointcloud_max_workers: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": "Maximum worker processes used when sampling pointclouds. None uses all CPUs."
+        },
+    )
+    pointcloud_sampling_seed: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Optional deterministic trimesh surface-sampling seed. Use the "
+                "same value for training and inference to preserve scene inputs."
+            )
+        },
+    )
     num_objects_per_env: int = field(
         default=None,
         metadata={"help": "Number of objects per environment. Must match scene data."},
@@ -1288,7 +1309,10 @@ class SceneLib:
         # Process pointclouds and instance tracking BEFORE deepcopy
         if self.config.pointcloud_samples_per_object is not None:
             self._compute_pointclouds_parallel(
-                scenes, self.config.pointcloud_samples_per_object
+                scenes,
+                self.config.pointcloud_samples_per_object,
+                self.config.pointcloud_max_workers,
+                self.config.pointcloud_sampling_seed,
             )
 
         # Process objects to set is_first_instance flags BEFORE deepcopy
@@ -1543,14 +1567,22 @@ class SceneLib:
 
         Maps each object to an integer class index for voxel observations.
         Class 0 = empty, 1 = terrain (both reserved), 2+ = object types.
-        All objects currently map to class 2 (generic object).  Extend
-        ``_DEFAULT_CLASS_MAP`` or pass a custom map to support finer classes.
+        IDs 2--5 denote mesh, box, sphere and cylinder respectively.
         """
         num_orig = len(self._original_scenes)
         objs_per = self.num_objects_per_scene
-        class_ids = torch.full(
-            (num_orig, objs_per), 2, dtype=torch.long, device=self.device
+        class_ids = torch.zeros(
+            (num_orig, objs_per), dtype=torch.long, device=self.device
         )
+        class_by_type = {
+            MeshSceneObject: 2,
+            BoxSceneObject: 3,
+            SphereSceneObject: 4,
+            CylinderSceneObject: 5,
+        }
+        for scene_id, scene in enumerate(self._original_scenes):
+            for object_id, obj in enumerate(scene.objects):
+                class_ids[scene_id, object_id] = class_by_type.get(type(obj), 2)
         # Zero out padding objects (invalid mask = False -> class 0)
         if self._per_object_valid_mask is not None:
             class_ids[~self._per_object_valid_mask] = 0
@@ -1579,8 +1611,27 @@ class SceneLib:
             orig_ids = self._scene_to_original_scene_id[env_ids]
         return self._object_class_ids[orig_ids]
 
+    def get_object_static_mask(
+        self, env_ids: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """Return whether each fixed object slot has no reference trajectory."""
+        if self._is_static_object is None or self._is_static_object.numel() == 0:
+            n = len(env_ids) if env_ids is not None else self.num_envs
+            return torch.zeros(
+                n, self.num_objects_per_scene, dtype=torch.bool, device=self.device
+            )
+        if env_ids is None:
+            original_ids = self._scene_to_original_scene_id
+        else:
+            original_ids = self._scene_to_original_scene_id[env_ids]
+        return self._is_static_object[original_ids]
+
     def _compute_pointclouds_parallel(
-        self, scenes: List[Scene], num_samples: int
+        self,
+        scenes: List[Scene],
+        num_samples: int,
+        max_workers: Optional[int] = None,
+        sampling_seed: Optional[int] = None,
     ) -> None:
         """Compute pointclouds with deduplication and parallel mesh sampling.
 
@@ -1619,12 +1670,23 @@ class SceneLib:
             oids = list(mesh_jobs.keys())
             paths = [mesh_jobs[oid].object_path for oid in oids]
 
-            max_workers = min(len(paths), os.cpu_count() or 4)
-            with ProcessPoolExecutor(max_workers=max_workers) as pool:
-                futures = {
-                    oid: pool.submit(_sample_mesh_pointcloud, path, num_samples)
-                    for oid, path in zip(oids, paths)
-                }
+            if max_workers is None:
+                max_workers = os.cpu_count() or 4
+            max_workers = max(1, int(max_workers))
+            used_workers = max(1, min(len(paths), max_workers))
+            with ProcessPoolExecutor(max_workers=used_workers) as pool:
+                if sampling_seed is None:
+                    futures = {
+                        oid: pool.submit(_sample_mesh_pointcloud, path, num_samples)
+                        for oid, path in zip(oids, paths)
+                    }
+                else:
+                    futures = {
+                        oid: pool.submit(
+                            _sample_mesh_pointcloud, path, num_samples, sampling_seed
+                        )
+                        for oid, path in zip(oids, paths)
+                    }
                 results = {oid: f.result() for oid, f in futures.items()}
 
             # Assign results to representatives
@@ -1650,7 +1712,7 @@ class SceneLib:
             len(mesh_jobs),
             num_total,
             elapsed,
-            min(len(mesh_jobs), os.cpu_count() or 4) if mesh_jobs else 0,
+            used_workers if mesh_jobs else 0,
         )
 
     def _process_scene_objects_for_asset_tracking(self, scenes: List[Scene]):

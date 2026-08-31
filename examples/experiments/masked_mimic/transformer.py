@@ -193,7 +193,12 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
                 expert_num_future = getattr(ctrl_cfg, 'future_steps', None)
                 if expert_num_future is not None:
                     masked_mimic_cfg = control_components["masked_mimic"]
-                    if masked_mimic_cfg.future_steps < expert_num_future:
+                    if isinstance(expert_num_future, list):
+                        masked_mimic_cfg.future_steps = list(expert_num_future)
+                    elif (
+                        isinstance(masked_mimic_cfg.future_steps, int)
+                        and masked_mimic_cfg.future_steps < expert_num_future
+                    ):
                         masked_mimic_cfg.future_steps = expert_num_future
         
         expert_obs_components = get_expert_observation_components(

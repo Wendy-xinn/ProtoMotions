@@ -21,3 +21,10 @@ renders/
 .envrc
 CLAUDE.local.md
 .cache/
+.wsl-vulkan/
+/IsaacLab/
+output/
+results/
+data/motion_for_trackers/
+*.pt
+*.pkl

@@ -84,6 +84,7 @@ class DiscretePriorWithPEFT(nn.Module):
         self.condition_key = condition_key
         self.conditioning_dim = conditioning_dim
         self.sampling_mode = sampling_mode
+        self.deterministic_generation = False
         self.film_input_norm = (
             NormObsBase(
                 NormObsBaseConfig(
@@ -446,6 +447,7 @@ class DiscretePriorWithPEFT(nn.Module):
                 temperature=self.temperature,
                 top_p=top_p,
                 prior_constraint=prior_constraint,
+                greedy=self.deterministic_generation,
                 transformer_kwargs=transformer_kwargs,
             )
         finally:

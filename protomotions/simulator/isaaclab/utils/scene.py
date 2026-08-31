@@ -46,6 +46,7 @@ class SceneCfg(InteractiveSceneCfg):
         robot_config: RobotConfig,
         terrain: Optional[Terrain] = None,
         scene_cfgs=None,
+        body_contact_filter_paths=None,
         projectile_config: Optional[ProjectileConfig] = None,
         pretty=False,
         *args,
@@ -95,7 +96,7 @@ class SceneCfg(InteractiveSceneCfg):
                 for i in range(num_objects_per_scene):
                     if i != obj_idx:
                         object_contact_paths.append(f"/World/envs/env_.*/Object_{i}")
-                if activate_contact_sensors:
+                if activate_contact_sensors and config.enable_object_contact_sensors:
                     object_sensor_cfg = ContactSensorCfg(
                         prim_path=f"/World/envs/env_.*/Object_{obj_idx}",
                         # debug_vis=True,
@@ -215,9 +216,22 @@ class SceneCfg(InteractiveSceneCfg):
             self.robot.spawn = self.robot.spawn.replace(rigid_props=new_rigid_props)
 
         if activate_contact_sensors:
-            sensing_filter = ["/World/ground/terrain/mesh"]
-            for obj_idx in range(num_objects_per_scene):
-                sensing_filter.append(f"/World/envs/env_.*/Object_{obj_idx}")
+            sensing_filter = []
+            if config.enable_body_contact_filter_matrix:
+                if terrain is not None:
+                    sensing_filter.append("/World/ground/terrain/mesh")
+                for obj_idx in range(num_objects_per_scene):
+                    if body_contact_filter_paths is not None and body_contact_filter_paths[obj_idx] is None:
+                        continue
+                    relative_path = (
+                        body_contact_filter_paths[obj_idx]
+                        if body_contact_filter_paths is not None
+                        else ""
+                    )
+                    suffix = f"/{relative_path}" if relative_path else ""
+                    sensing_filter.append(
+                        f"/World/envs/env_.*/Object_{obj_idx}{suffix}"
+                    )
             for body_name in robot_config.contact_bodies:
                 contact_sensor_cfg = ContactSensorCfg(
                     prim_path=contact_sensor_prim_path(body_name, body_prim_paths),

@@ -255,6 +255,15 @@ class DiscretePriorPEFTSFTModelConfig(DiscretePriorPEFTBaseModelConfig):
         default="replace",
         metadata={"help": "Token perturbation mode: replace, neighbor, or mixed."},
     )
+    fsq_scalar_aux_weight: float = field(
+        default=0.0,
+        metadata={
+            "help": (
+                "Auxiliary cross-entropy weight for the unpacked FSQ scalars. "
+                "Zero preserves packed-token-only SFT."
+            )
+        },
+    )
 
 
 @dataclass
@@ -323,3 +332,23 @@ class DiscretePriorPEFTSFTAgentConfig(SupervisedAgentConfig):
     save_inference_checkpoint: bool = True
     num_mini_epochs: int = 2
     gradient_clip_val: float = 25.0
+    offline_cache_output: Optional[str] = field(
+        default=None,
+        metadata={"help": "Collect one deterministic expert cache and exit."},
+    )
+    offline_cache_split: str = field(
+        default="train",
+        metadata={"help": "Dataset split recorded in newly collected cache files."},
+    )
+    offline_dataset_path: Optional[str] = field(
+        default=None,
+        metadata={"help": "Train from cached expert transitions instead of simulator rollouts."},
+    )
+    offline_dataset_split: str = field(
+        default="train",
+        metadata={"help": "Comma-separated cached splits used for optimization."},
+    )
+    offline_num_epochs: int = field(
+        default=100,
+        metadata={"help": "Complete passes over an offline SFT dataset."},
+    )

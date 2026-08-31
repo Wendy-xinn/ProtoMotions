@@ -698,6 +698,36 @@ def test_sample_mesh_pointcloud_uses_stl_when_obj_is_absent(tmp_path, monkeypatc
     assert normals.tolist() == [[1.0, 0.0, 0.0]]
 
 
+def test_sample_mesh_pointcloud_forwards_deterministic_seed(tmp_path, monkeypatch):
+    object_path = tmp_path / "seeded.usd"
+    obj_path = tmp_path / "seeded.obj"
+    obj_path.write_text("# placeholder")
+    fake_mesh = SimpleNamespace(
+        face_normals=np.array([[0.0, 0.0, 1.0]], dtype=np.float32)
+    )
+    seeds = []
+
+    monkeypatch.setattr(scene_lib_module.trimesh, "load_mesh", lambda path: fake_mesh)
+    monkeypatch.setattr(scene_lib_module, "as_mesh", lambda mesh: mesh)
+
+    def sample_surface_even(mesh, count, seed=None):
+        seeds.append(seed)
+        return (
+            np.zeros((count, 3), dtype=np.float32),
+            np.zeros(count, dtype=np.int64),
+        )
+
+    monkeypatch.setattr(
+        scene_lib_module.trimesh.sample,
+        "sample_surface_even",
+        sample_surface_even,
+    )
+
+    _sample_mesh_pointcloud(str(object_path), 2, seed=17)
+
+    assert seeds == [17]
+
+
 def test_sample_mesh_pointcloud_raises_when_no_resolved_mesh_file_exists(tmp_path):
     with pytest.raises(FileNotFoundError, match="Object file not found"):
         _sample_mesh_pointcloud(str(tmp_path / "missing.usd"), 4)

@@ -4,6 +4,7 @@
 """SFT model for PEFT adapters on a frozen discrete-token GPC prior."""
 
 import torch
+import torch.nn.functional as F
 from tensordict import TensorDict
 
 from protomotions.agents.common.latent import (
@@ -12,6 +13,63 @@ from protomotions.agents.common.latent import (
     TARGET_LATENT_KEY,
 )
 from protomotions.agents.peft.model import DiscretePriorPEFTModel
+
+
+def factorized_fsq_cross_entropy(
+    logits: torch.Tensor,
+    target_tokens: torch.Tensor,
+    *,
+    num_levels: int,
+    scalars_per_token: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Marginalize packed-token logits into small FSQ scalar classifiers.
+
+    A packed token is a mixed-radix integer with the first FSQ scalar as the
+    least-significant digit. Reshaping the vocabulary therefore exposes axes in
+    reverse scalar order. Marginal log probabilities preserve the original
+    packed-token head while giving partial credit for correct scalar digits.
+    """
+    expected_vocab = num_levels**scalars_per_token
+    if logits.shape[-1] != expected_vocab:
+        raise ValueError(
+            f"Expected packed vocabulary {expected_vocab}, got {logits.shape[-1]}"
+        )
+    if target_tokens.shape != logits.shape[:-1]:
+        raise ValueError(
+            f"Target shape {target_tokens.shape} does not match logits {logits.shape[:-1]}"
+        )
+
+    log_joint = F.log_softmax(logits, dim=-1).reshape(
+        *logits.shape[:-1], *([num_levels] * scalars_per_token)
+    )
+    basis = target_tokens.new_tensor(
+        [num_levels**i for i in range(scalars_per_token)]
+    )
+    scalar_targets = (
+        target_tokens.unsqueeze(-1).div(basis, rounding_mode="floor") % num_levels
+    )
+    packed_rank = logits.ndim - 1
+    scalar_losses = []
+    scalar_correct = []
+    for scalar_index in range(scalars_per_token):
+        keep_axis = packed_rank + (scalars_per_token - 1 - scalar_index)
+        reduce_axes = tuple(
+            axis
+            for axis in range(packed_rank, packed_rank + scalars_per_token)
+            if axis != keep_axis
+        )
+        scalar_log_probs = torch.logsumexp(log_joint, dim=reduce_axes)
+        scalar_target = scalar_targets[..., scalar_index]
+        scalar_losses.append(
+            F.nll_loss(
+                scalar_log_probs.reshape(-1, num_levels),
+                scalar_target.reshape(-1),
+            )
+        )
+        scalar_correct.append(
+            (scalar_log_probs.argmax(dim=-1) == scalar_target).float().mean()
+        )
+    return torch.stack(scalar_losses).mean(), torch.stack(scalar_correct).mean()
 
 
 class DiscretePriorPEFTSFTModel(DiscretePriorPEFTModel):
@@ -45,6 +103,16 @@ class DiscretePriorPEFTSFTModel(DiscretePriorPEFTModel):
             )
         return tensordict
 
+    def collect_student_rollout(self, tensordict: TensorDict) -> TensorDict:
+        """Generate tokens autoregressively from deployable task inputs.
+
+        ``forward`` is intentionally the teacher-forced optimization path for
+        this SFT model.  Evaluation and inference must call this explicit
+        method instead; otherwise a TensorDict without cached target tokens
+        would silently enter ``collect_expert_rollout`` and execute the oracle.
+        """
+        return super().forward_rollout(tensordict)
+
     def materialize(self, tensordict: TensorDict) -> TensorDict:
         expert_td = self.collect_expert_rollout(tensordict.clone())
         return self.forward(expert_td)
@@ -66,3 +134,36 @@ class DiscretePriorPEFTSFTModel(DiscretePriorPEFTModel):
         prior_dict = self._actor.build_prior_input(tensordict, tokens=teacher_tokens)
         tensordict[LATENT_LOGITS_KEY] = self._actor(prior_dict)
         return tensordict
+
+    def compute_model_loss(
+        self,
+        tensordict: TensorDict,
+        current_epoch: int,
+        zero_loss,
+        log_prefix: str = "model",
+    ):
+        loss, logs = super().compute_model_loss(
+            tensordict,
+            current_epoch=current_epoch,
+            zero_loss=zero_loss,
+            log_prefix=log_prefix,
+        )
+        weight = float(self.config.fsq_scalar_aux_weight)
+        if weight <= 0.0:
+            return loss, logs
+        scalar_loss, scalar_accuracy = factorized_fsq_cross_entropy(
+            tensordict[LATENT_LOGITS_KEY],
+            tensordict[TARGET_LATENT_KEY],
+            num_levels=self._actor.num_fsq_levels,
+            scalars_per_token=self._actor.fsq_scalars_per_prior_token,
+        )
+        weighted = scalar_loss * weight
+        loss = loss + weighted
+        logs.update(
+            {
+                f"{log_prefix}/fsq_scalar_cross_entropy": scalar_loss.detach(),
+                f"{log_prefix}/fsq_scalar_accuracy": scalar_accuracy.detach(),
+                f"{log_prefix}/fsq_scalar_aux_loss": weighted.detach(),
+            }
+        )
+        return loss, logs

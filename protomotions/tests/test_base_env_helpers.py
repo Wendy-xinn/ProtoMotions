@@ -649,6 +649,8 @@ def test_base_env_scene_surface_context_ignores_objects_without_pointclouds():
 
     assert context.object_pos.shape == (2, 0, 3)
     assert context.object_rot.shape == (2, 0, 4)
+    assert context.object_vel.shape == (2, 0, 3)
+    assert context.object_ang_vel.shape == (2, 0, 3)
     assert context.neutral_pointclouds.shape == (2, 0, 0, 3)
     assert context.object_valid_mask.shape == (2, 0)
 
@@ -671,6 +673,8 @@ def test_base_env_build_context_selects_subset_without_caching_it():
     assert context.terrain.height_points.shape[0] == len(env_ids)
     assert context.scene.object_pos.shape == (len(env_ids), 0, 3)
     assert torch.equal(context.progress_buf, env.progress_buf[env_ids])
+    assert context.motion_ids is None
+    assert context.motion_times is None
     assert torch.equal(context.odom_start_xy, env.odom_start_xy[env_ids])
     assert context.odom_disp_start_clean.shape == (len(env_ids), 2)
     assert env._current_context is None
@@ -1411,6 +1415,26 @@ def test_base_env_motion_manager_markers_state_save_restore_and_close(monkeypatc
 
     BaseEnv.close(env)
     assert env.simulator.closed is True
+
+
+def test_headless_markers_state_keeps_reference_recording_stream():
+    env = _make_env(scenes=0, motions=2, headless=True)
+    env.motion_manager = _MotionManager()
+    env.config.record_reference_motion = True
+    env.respawn_root_offset[:] = torch.tensor([1.0, 2.0, 0.0])
+
+    markers = BaseEnv.get_markers_state(env)
+
+    assert set(markers) == {"recording_reference_pose"}
+    reference = markers["recording_reference_pose"]
+    assert torch.equal(
+        reference.translation,
+        env.motion_lib.get_motion_state(
+            env.motion_manager.motion_ids,
+            env.motion_manager.motion_times,
+        ).rigid_body_pos
+        + env.respawn_root_offset[:, None, :],
+    )
 
 
 def test_base_env_constructor_initializes_lightweight_dependencies(monkeypatch):

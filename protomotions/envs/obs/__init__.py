@@ -67,6 +67,22 @@ from protomotions.envs.obs.path import compute_path_obs
 
 # Nearest-surface observation compute kernel
 from protomotions.envs.obs.nearest_surface_obs import compute_nearest_surface_vectors
+from protomotions.envs.obs.scene_object_state import (
+    compute_scene_object_state_obs,
+    compute_scene_object_token_obs,
+)
+from protomotions.envs.obs.local_scene_pointcloud import compute_local_scene_pointcloud_obs
+from protomotions.envs.obs.ego_visible_scene_pointcloud import (
+    compute_ego_visible_scene_pointcloud_obs,
+)
+from protomotions.envs.obs.contact_feedback import (
+    compute_body_contact_feedback_obs,
+    compute_reference_contact_obs,
+)
+from protomotions.envs.obs.future_scene_interaction import (
+    compute_future_scene_interaction_targets,
+    compute_future_scene_query_obs,
+)
 
 # Target observation compute kernel
 from protomotions.envs.obs.target import compute_target_obs
@@ -125,6 +141,14 @@ __all__ = [
     "compute_path_obs",
     # Nearest-surface observation compute kernel
     "compute_nearest_surface_vectors",
+    "compute_scene_object_state_obs",
+    "compute_scene_object_token_obs",
+    "compute_local_scene_pointcloud_obs",
+    "compute_ego_visible_scene_pointcloud_obs",
+    "compute_body_contact_feedback_obs",
+    "compute_reference_contact_obs",
+    "compute_future_scene_interaction_targets",
+    "compute_future_scene_query_obs",
     # Target observation compute kernel
     "compute_target_obs",
     # Nearest surface observation compute kernel

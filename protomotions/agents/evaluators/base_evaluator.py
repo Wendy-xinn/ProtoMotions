@@ -24,6 +24,8 @@ Note:
     accumulated MotionMetrics trajectories.
 """
 
+from pathlib import Path
+
 import logging
 import numpy as np
 import torch
@@ -72,6 +74,15 @@ class BaseEvaluator:
         self.agent = agent
         self.fabric = fabric
         self.config = config
+        # Inference diagnostics can bypass the learned prior and execute the
+        # frozen target encoder's oracle FSQ tokens through the same decoder.
+        self.use_expert_rollout = False
+        self.target_token_record_path: Optional[str] = None
+        self._recorded_target_tokens: list[Tensor] = []
+        self.student_oracle_token_record_path: Optional[str] = None
+        self._recorded_student_tokens: list[Tensor] = []
+        self._recorded_student_state_oracle_tokens: list[Tensor] = []
+        self._recorded_student_observations: dict[str, list[Tensor]] = {}
 
         self.metric_plugins = []
         self._register_plugins()
@@ -228,7 +239,81 @@ class BaseEvaluator:
 
     def _policy_action(self, obs_td) -> Tensor:
         """Run the policy and select the deterministic action when available."""
-        model_outs = self.agent.model(obs_td)
+        intervention = getattr(
+            self.config, "policy_observation_intervention", "none"
+        )
+        intervention_keys = getattr(
+            self.config, "policy_observation_intervention_keys", []
+        )
+        if intervention != "none":
+            obs_td = obs_td.clone()
+            for key in intervention_keys:
+                if key not in obs_td:
+                    continue
+                if intervention == "zero":
+                    obs_td[key] = torch.zeros_like(obs_td[key])
+                elif intervention == "shuffle":
+                    if obs_td.batch_size[0] > 1:
+                        obs_td[key] = obs_td[key].roll(1, dims=0)
+                else:
+                    raise ValueError(
+                        f"Unknown policy observation intervention: {intervention}"
+                    )
+        if self.use_expert_rollout:
+            expert_rollout = getattr(
+                self.agent.model, "collect_expert_rollout", None
+            )
+            if expert_rollout is None:
+                raise ValueError(
+                    "Oracle target-token rollout requires a model with "
+                    "collect_expert_rollout()."
+                )
+            model_outs = expert_rollout(obs_td)
+        else:
+            student_rollout = getattr(
+                self.agent.model, "collect_student_rollout", None
+            )
+            model_outs = (
+                student_rollout(obs_td)
+                if student_rollout is not None
+                else self.agent.model(obs_td)
+            )
+        if self.student_oracle_token_record_path is not None:
+            if self.use_expert_rollout:
+                raise ValueError(
+                    "Student/oracle token comparison requires student rollout."
+                )
+            expert_rollout = getattr(
+                self.agent.model, "collect_expert_rollout", None
+            )
+            if expert_rollout is None or "prior_tokens" not in model_outs:
+                raise ValueError(
+                    "Student/oracle token comparison requires PEFT student and "
+                    "expert rollout methods."
+                )
+            expert_outs = expert_rollout(obs_td.clone())
+            self._recorded_student_tokens.append(
+                model_outs["prior_tokens"][0].detach().cpu().clone()
+            )
+            self._recorded_student_state_oracle_tokens.append(
+                expert_outs["target_latent"][0].detach().cpu().clone()
+            )
+            actor = getattr(self.agent.model, "_actor", None)
+            observation_keys = list(getattr(actor, "in_keys", []))
+            observation_keys.extend(getattr(actor, "frozen_prior_input_keys", []))
+            for key in dict.fromkeys(observation_keys):
+                if key in obs_td:
+                    self._recorded_student_observations.setdefault(key, []).append(
+                        obs_td[key][0].detach().cpu().clone()
+                    )
+        if self.target_token_record_path is not None:
+            if "target_latent" not in model_outs:
+                raise KeyError(
+                    "Target-token recording requires expert output 'target_latent'."
+                )
+            self._recorded_target_tokens.append(
+                model_outs["target_latent"][0].detach().cpu().clone()
+            )
         return (
             model_outs["mean_action"]
             if "mean_action" in model_outs
@@ -685,19 +770,40 @@ class BaseEvaluator:
         plt.close(fig)
         print("Per-frame metrics plotted successfully")
 
-    def simple_test_policy(self, collect_metrics: bool = False) -> None:
+    def simple_test_policy(
+        self,
+        collect_metrics: bool = False,
+        max_steps: int | None = None,
+        auto_record: bool = False,
+    ) -> None:
         """
         Simple evaluation loop for interactive testing.
 
         Runs policy indefinitely, collecting running average of metrics.
-        Press Ctrl+C to stop and print summary.
+        Press Ctrl+C to stop and print summary. When ``max_steps`` is set,
+        the loop stops after that many environment steps. ``auto_record``
+        toggles the simulator's normal viewer recorder at the beginning and
+        finalizes it at the end. Non-headless simulators also capture video;
+        headless simulators save motion/GT/object sidecars without a viewport.
 
         Args:
             collect_metrics: If True, collect and print average metrics on exit.
         """
         self.agent.eval()
+        self._recorded_target_tokens = []
+        self._recorded_student_tokens = []
+        self._recorded_student_state_oracle_tokens = []
+        self._recorded_student_observations = {}
         done_indices = None
         step = 0
+
+        simulator = getattr(self.env, "simulator", None)
+        recording_started = False
+        if auto_record:
+            if simulator is None:
+                raise ValueError("Automatic recording requires a simulator.")
+            simulator._toggle_video_record()
+            recording_started = True
 
         # Running averages for metrics
         metric_sums: Dict[str, float] = {}
@@ -724,6 +830,8 @@ class BaseEvaluator:
 
                 done_indices = dones.nonzero(as_tuple=False).squeeze(-1)
                 step += 1
+                if max_steps is not None and step >= max_steps:
+                    break
         except KeyboardInterrupt:
             print(f"\nStopped after {step} steps.")
             if collect_metrics and metric_counts:
@@ -731,3 +839,37 @@ class BaseEvaluator:
                 for k in sorted(metric_counts.keys()):
                     avg = metric_sums[k] / metric_counts[k]
                     print(f"  {k}: {avg:.4f}")
+        finally:
+            if self.target_token_record_path is not None:
+                output_path = Path(self.target_token_record_path)
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                if not self._recorded_target_tokens:
+                    raise RuntimeError("No target tokens were recorded.")
+                tokens = torch.stack(self._recorded_target_tokens)
+                torch.save(
+                    {"target_latent": tokens, "num_steps": len(tokens)}, output_path
+                )
+                print(f"Target tokens saved to {output_path}")
+            if self.student_oracle_token_record_path is not None:
+                output_path = Path(self.student_oracle_token_record_path)
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                student = torch.stack(self._recorded_student_tokens)
+                oracle = torch.stack(self._recorded_student_state_oracle_tokens)
+                torch.save(
+                    {
+                        "student_prior_tokens": student,
+                        "student_state_oracle_tokens": oracle,
+                        "observations": {
+                            key: torch.stack(values)
+                            for key, values in self._recorded_student_observations.items()
+                        },
+                        "num_steps": len(student),
+                    },
+                    output_path,
+                )
+                print(f"Student/oracle token comparison saved to {output_path}")
+            if recording_started and getattr(simulator, "_user_is_recording", False):
+                # ``render`` consumes the state-change flag and writes motion
+                # sidecars, plus an MP4 when a viewport is available.
+                simulator._toggle_video_record()
+                simulator.render()

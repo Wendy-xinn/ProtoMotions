@@ -145,6 +145,7 @@ def test_train_agent_parser_and_bool_helpers(monkeypatch, tmp_path):
     assert parsed.wandb_project == "physical_animation"
     assert parsed.create_config_only is True
     assert parsed.training_max_iterations is None
+    assert parsed.resume_training_max_iterations is None
 
     parsed = parser.parse_args(
         [
@@ -186,9 +187,12 @@ def test_train_agent_parser_and_bool_helpers(monkeypatch, tmp_path):
             "parser",
             "--training-max-iterations",
             "30",
+            "--resume-training-max-iterations",
+            "50",
         ]
     )
     assert parsed.training_max_iterations == 30
+    assert parsed.resume_training_max_iterations == 50
 
     required_args = [
         "--robot-name",

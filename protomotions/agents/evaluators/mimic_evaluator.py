@@ -235,7 +235,18 @@ class MimicEvaluator(BaseEvaluator):
 
         if fixed_motion_ids.numel() > 0:
             print(f"Only evaluating fixed motions: {fixed_motion_ids}")
-            return [(first_env_indices, fixed_motion_ids)]
+            batch_size = self.config.fixed_motion_eval_batch_size
+            if batch_size is None or batch_size >= fixed_motion_ids.numel():
+                return [(first_env_indices, fixed_motion_ids)]
+            if batch_size <= 0:
+                raise ValueError("fixed_motion_eval_batch_size must be positive")
+            return [
+                (
+                    first_env_indices[start : start + batch_size],
+                    fixed_motion_ids[start : start + batch_size],
+                )
+                for start in range(0, fixed_motion_ids.numel(), batch_size)
+            ]
 
         num_motions = self.motion_lib.num_motions()
         batches = []

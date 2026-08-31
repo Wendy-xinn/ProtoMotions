@@ -1,0 +1,538 @@
+<?xml version='1.0' encoding='utf-8'?>
+<robot name="soma23_retarget">
+  <link name="world" />
+  <link name="Hips" />
+  <joint name="world_to_Hips" type="fixed">
+    <parent link="world" />
+    <child link="Hips" />
+    <origin xyz="0.0000 0.0000 0.0000" rpy="0 0 0" />
+  </joint>
+  <link name="Spine1__axis0" />
+  <joint name="Spine1_x" type="revolute">
+    <parent link="Hips" />
+    <child link="Spine1__axis0" />
+    <origin xyz="0.0000 0.0005 0.0500" rpy="0 0 0" />
+    <axis xyz="1.0000 0.0000 0.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="Spine1__axis1" />
+  <joint name="Spine1_y" type="revolute">
+    <parent link="Spine1__axis0" />
+    <child link="Spine1__axis1" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 1.0000 0.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="Spine1" />
+  <joint name="Spine1_z" type="revolute">
+    <parent link="Spine1__axis1" />
+    <child link="Spine1" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 0.0000 1.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="Spine2__axis0" />
+  <joint name="Spine2_x" type="revolute">
+    <parent link="Spine1" />
+    <child link="Spine2__axis0" />
+    <origin xyz="0.0000 0.0003 0.0713" rpy="0 0 0" />
+    <axis xyz="1.0000 0.0000 0.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="Spine2__axis1" />
+  <joint name="Spine2_y" type="revolute">
+    <parent link="Spine2__axis0" />
+    <child link="Spine2__axis1" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 1.0000 0.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="Spine2" />
+  <joint name="Spine2_z" type="revolute">
+    <parent link="Spine2__axis1" />
+    <child link="Spine2" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 0.0000 1.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="Chest__axis0" />
+  <joint name="Chest_x" type="revolute">
+    <parent link="Spine2" />
+    <child link="Chest__axis0" />
+    <origin xyz="0.0000 0.0082 0.0755" rpy="0 0 0" />
+    <axis xyz="1.0000 0.0000 0.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="Chest__axis1" />
+  <joint name="Chest_y" type="revolute">
+    <parent link="Chest__axis0" />
+    <child link="Chest__axis1" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 1.0000 0.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="Chest" />
+  <joint name="Chest_z" type="revolute">
+    <parent link="Chest__axis1" />
+    <child link="Chest" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 0.0000 1.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="Neck1__axis0" />
+  <joint name="Neck1_x" type="revolute">
+    <parent link="Chest" />
+    <child link="Neck1__axis0" />
+    <origin xyz="-0.0018 0.0055 0.2631" rpy="0 0 0" />
+    <axis xyz="1.0000 0.0000 0.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="Neck1__axis1" />
+  <joint name="Neck1_y" type="revolute">
+    <parent link="Neck1__axis0" />
+    <child link="Neck1__axis1" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 1.0000 0.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="Neck1" />
+  <joint name="Neck1_z" type="revolute">
+    <parent link="Neck1__axis1" />
+    <child link="Neck1" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 0.0000 1.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="Neck2__axis0" />
+  <joint name="Neck2_x" type="revolute">
+    <parent link="Neck1" />
+    <child link="Neck2__axis0" />
+    <origin xyz="0.0000 -0.0230 0.0771" rpy="0 0 0" />
+    <axis xyz="1.0000 0.0000 0.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="Neck2__axis1" />
+  <joint name="Neck2_y" type="revolute">
+    <parent link="Neck2__axis0" />
+    <child link="Neck2__axis1" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 1.0000 0.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="Neck2" />
+  <joint name="Neck2_z" type="revolute">
+    <parent link="Neck2__axis1" />
+    <child link="Neck2" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 0.0000 1.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="Head__axis0" />
+  <joint name="Head_x" type="revolute">
+    <parent link="Neck2" />
+    <child link="Head__axis0" />
+    <origin xyz="0.0000 -0.0195 0.0613" rpy="0 0 0" />
+    <axis xyz="1.0000 0.0000 0.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="Head__axis1" />
+  <joint name="Head_y" type="revolute">
+    <parent link="Head__axis0" />
+    <child link="Head__axis1" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 1.0000 0.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="Head" />
+  <joint name="Head_z" type="revolute">
+    <parent link="Head__axis1" />
+    <child link="Head" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 0.0000 1.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="RightShoulder__axis0" />
+  <joint name="RightShoulder_x" type="revolute">
+    <parent link="Chest" />
+    <child link="RightShoulder__axis0" />
+    <origin xyz="-0.0138 -0.0521 0.2318" rpy="0 0 0" />
+    <axis xyz="1.0000 0.0000 0.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="RightShoulder__axis1" />
+  <joint name="RightShoulder_y" type="revolute">
+    <parent link="RightShoulder__axis0" />
+    <child link="RightShoulder__axis1" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 1.0000 0.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="RightShoulder" />
+  <joint name="RightShoulder_z" type="revolute">
+    <parent link="RightShoulder__axis1" />
+    <child link="RightShoulder" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 0.0000 1.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="RightArm__axis0" />
+  <joint name="RightArm_x" type="revolute">
+    <parent link="RightShoulder" />
+    <child link="RightArm__axis0" />
+    <origin xyz="-0.1504 0.0555 0.0000" rpy="0 0 0" />
+    <axis xyz="1.0000 0.0000 0.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="RightArm__axis1" />
+  <joint name="RightArm_y" type="revolute">
+    <parent link="RightArm__axis0" />
+    <child link="RightArm__axis1" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 1.0000 0.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="RightArm" />
+  <joint name="RightArm_z" type="revolute">
+    <parent link="RightArm__axis1" />
+    <child link="RightArm" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 0.0000 1.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="RightForeArm__axis0" />
+  <joint name="RightForeArm_x" type="revolute">
+    <parent link="RightArm" />
+    <child link="RightForeArm__axis0" />
+    <origin xyz="-0.2874 0.0000 0.0000" rpy="0 0 0" />
+    <axis xyz="1.0000 0.0000 0.0000" />
+    <limit lower="0.000000000" upper="2.705260341" effort="1000" velocity="20" />
+  </joint>
+  <link name="RightForeArm__axis1" />
+  <joint name="RightForeArm_y" type="revolute">
+    <parent link="RightForeArm__axis0" />
+    <child link="RightForeArm__axis1" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 1.0000 0.0000" />
+    <limit lower="-0.349065850" upper="0.349065850" effort="1000" velocity="20" />
+  </joint>
+  <link name="RightForeArm" />
+  <joint name="RightForeArm_z" type="revolute">
+    <parent link="RightForeArm__axis1" />
+    <child link="RightForeArm" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 0.0000 1.0000" />
+    <limit lower="-0.610865238" upper="0.610865238" effort="1000" velocity="20" />
+  </joint>
+  <link name="RightHand__axis0" />
+  <joint name="RightHand_x" type="revolute">
+    <parent link="RightForeArm" />
+    <child link="RightHand__axis0" />
+    <origin xyz="-0.2713 0.0000 0.0000" rpy="0 0 0" />
+    <axis xyz="1.0000 0.0000 0.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="RightHand__axis1" />
+  <joint name="RightHand_y" type="revolute">
+    <parent link="RightHand__axis0" />
+    <child link="RightHand__axis1" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 1.0000 0.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="RightHand" />
+  <joint name="RightHand_z" type="revolute">
+    <parent link="RightHand__axis1" />
+    <child link="RightHand" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 0.0000 1.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="LeftShoulder__axis0" />
+  <joint name="LeftShoulder_x" type="revolute">
+    <parent link="Chest" />
+    <child link="LeftShoulder__axis0" />
+    <origin xyz="0.0162 -0.0511 0.2324" rpy="0 0 0" />
+    <axis xyz="-1.0000 0.0000 0.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="LeftShoulder__axis1" />
+  <joint name="LeftShoulder_y" type="revolute">
+    <parent link="LeftShoulder__axis0" />
+    <child link="LeftShoulder__axis1" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 1.0000 0.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="LeftShoulder" />
+  <joint name="LeftShoulder_z" type="revolute">
+    <parent link="LeftShoulder__axis1" />
+    <child link="LeftShoulder" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 0.0000 1.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="LeftArm__axis0" />
+  <joint name="LeftArm_x" type="revolute">
+    <parent link="LeftShoulder" />
+    <child link="LeftArm__axis0" />
+    <origin xyz="0.1492 0.0550 0.0000" rpy="0 0 0" />
+    <axis xyz="-1.0000 0.0000 0.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="LeftArm__axis1" />
+  <joint name="LeftArm_y" type="revolute">
+    <parent link="LeftArm__axis0" />
+    <child link="LeftArm__axis1" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 1.0000 0.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="LeftArm" />
+  <joint name="LeftArm_z" type="revolute">
+    <parent link="LeftArm__axis1" />
+    <child link="LeftArm" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 0.0000 1.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="LeftForeArm__axis0" />
+  <joint name="LeftForeArm_x" type="revolute">
+    <parent link="LeftArm" />
+    <child link="LeftForeArm__axis0" />
+    <origin xyz="0.2874 0.0000 0.0000" rpy="0 0 0" />
+    <axis xyz="-1.0000 0.0000 0.0000" />
+    <limit lower="-2.705260341" upper="0.000000000" effort="1000" velocity="20" />
+  </joint>
+  <link name="LeftForeArm__axis1" />
+  <joint name="LeftForeArm_y" type="revolute">
+    <parent link="LeftForeArm__axis0" />
+    <child link="LeftForeArm__axis1" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 1.0000 0.0000" />
+    <limit lower="-0.349065850" upper="0.349065850" effort="1000" velocity="20" />
+  </joint>
+  <link name="LeftForeArm" />
+  <joint name="LeftForeArm_z" type="revolute">
+    <parent link="LeftForeArm__axis1" />
+    <child link="LeftForeArm" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 0.0000 1.0000" />
+    <limit lower="-0.610865238" upper="0.610865238" effort="1000" velocity="20" />
+  </joint>
+  <link name="LeftHand__axis0" />
+  <joint name="LeftHand_x" type="revolute">
+    <parent link="LeftForeArm" />
+    <child link="LeftHand__axis0" />
+    <origin xyz="0.2709 0.0000 0.0000" rpy="0 0 0" />
+    <axis xyz="-1.0000 0.0000 0.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="LeftHand__axis1" />
+  <joint name="LeftHand_y" type="revolute">
+    <parent link="LeftHand__axis0" />
+    <child link="LeftHand__axis1" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 1.0000 0.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="LeftHand" />
+  <joint name="LeftHand_z" type="revolute">
+    <parent link="LeftHand__axis1" />
+    <child link="LeftHand" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 0.0000 1.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="RightLeg__axis0" />
+  <joint name="RightLeg_x" type="revolute">
+    <parent link="Hips" />
+    <child link="RightLeg__axis0" />
+    <origin xyz="-0.1005 -0.0262 -0.0830" rpy="0 0 0" />
+    <axis xyz="1.0000 0.0000 0.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="RightLeg__axis1" />
+  <joint name="RightLeg_y" type="revolute">
+    <parent link="RightLeg__axis0" />
+    <child link="RightLeg__axis1" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 1.0000 0.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="RightLeg" />
+  <joint name="RightLeg_z" type="revolute">
+    <parent link="RightLeg__axis1" />
+    <child link="RightLeg" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 0.0000 1.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="RightShin__axis0" />
+  <joint name="RightShin_x" type="revolute">
+    <parent link="RightLeg" />
+    <child link="RightShin__axis0" />
+    <origin xyz="0.0000 0.0081 -0.4336" rpy="0 0 0" />
+    <axis xyz="1.0000 0.0000 0.0000" />
+    <limit lower="0.000000000" upper="2.705260341" effort="1000" velocity="20" />
+  </joint>
+  <link name="RightShin__axis1" />
+  <joint name="RightShin_y" type="revolute">
+    <parent link="RightShin__axis0" />
+    <child link="RightShin__axis1" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 1.0000 0.0000" />
+    <limit lower="-0.139626340" upper="0.139626340" effort="1000" velocity="20" />
+  </joint>
+  <link name="RightShin" />
+  <joint name="RightShin_z" type="revolute">
+    <parent link="RightShin__axis1" />
+    <child link="RightShin" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 0.0000 1.0000" />
+    <limit lower="-0.139626340" upper="0.139626340" effort="1000" velocity="20" />
+  </joint>
+  <link name="RightFoot__axis0" />
+  <joint name="RightFoot_x" type="revolute">
+    <parent link="RightShin" />
+    <child link="RightFoot__axis0" />
+    <origin xyz="0.0000 0.0348 -0.4212" rpy="0 0 0" />
+    <axis xyz="1.0000 0.0000 0.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="RightFoot__axis1" />
+  <joint name="RightFoot_y" type="revolute">
+    <parent link="RightFoot__axis0" />
+    <child link="RightFoot__axis1" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 1.0000 0.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="RightFoot" />
+  <joint name="RightFoot_z" type="revolute">
+    <parent link="RightFoot__axis1" />
+    <child link="RightFoot" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 0.0000 1.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="RightToeBase__axis0" />
+  <joint name="RightToeBase_x" type="revolute">
+    <parent link="RightFoot" />
+    <child link="RightToeBase__axis0" />
+    <origin xyz="0.0000 -0.1328 -0.0508" rpy="0 0 0" />
+    <axis xyz="1.0000 0.0000 0.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="RightToeBase__axis1" />
+  <joint name="RightToeBase_y" type="revolute">
+    <parent link="RightToeBase__axis0" />
+    <child link="RightToeBase__axis1" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 1.0000 0.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="RightToeBase" />
+  <joint name="RightToeBase_z" type="revolute">
+    <parent link="RightToeBase__axis1" />
+    <child link="RightToeBase" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 0.0000 1.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="LeftLeg__axis0" />
+  <joint name="LeftLeg_x" type="revolute">
+    <parent link="Hips" />
+    <child link="LeftLeg__axis0" />
+    <origin xyz="0.1004 -0.0260 -0.0843" rpy="0 0 0" />
+    <axis xyz="-1.0000 0.0000 0.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="LeftLeg__axis1" />
+  <joint name="LeftLeg_y" type="revolute">
+    <parent link="LeftLeg__axis0" />
+    <child link="LeftLeg__axis1" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 1.0000 0.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="LeftLeg" />
+  <joint name="LeftLeg_z" type="revolute">
+    <parent link="LeftLeg__axis1" />
+    <child link="LeftLeg" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 0.0000 1.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="LeftShin__axis0" />
+  <joint name="LeftShin_x" type="revolute">
+    <parent link="LeftLeg" />
+    <child link="LeftShin__axis0" />
+    <origin xyz="0.0000 0.0080 -0.4322" rpy="0 0 0" />
+    <axis xyz="-1.0000 0.0000 0.0000" />
+    <limit lower="-2.705260341" upper="0.000000000" effort="1000" velocity="20" />
+  </joint>
+  <link name="LeftShin__axis1" />
+  <joint name="LeftShin_y" type="revolute">
+    <parent link="LeftShin__axis0" />
+    <child link="LeftShin__axis1" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 1.0000 0.0000" />
+    <limit lower="-0.139626340" upper="0.139626340" effort="1000" velocity="20" />
+  </joint>
+  <link name="LeftShin" />
+  <joint name="LeftShin_z" type="revolute">
+    <parent link="LeftShin__axis1" />
+    <child link="LeftShin" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 0.0000 1.0000" />
+    <limit lower="-0.139626340" upper="0.139626340" effort="1000" velocity="20" />
+  </joint>
+  <link name="LeftFoot__axis0" />
+  <joint name="LeftFoot_x" type="revolute">
+    <parent link="LeftShin" />
+    <child link="LeftFoot__axis0" />
+    <origin xyz="0.0000 0.0348 -0.4216" rpy="0 0 0" />
+    <axis xyz="-1.0000 0.0000 0.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="LeftFoot__axis1" />
+  <joint name="LeftFoot_y" type="revolute">
+    <parent link="LeftFoot__axis0" />
+    <child link="LeftFoot__axis1" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 1.0000 0.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="LeftFoot" />
+  <joint name="LeftFoot_z" type="revolute">
+    <parent link="LeftFoot__axis1" />
+    <child link="LeftFoot" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 0.0000 1.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="LeftToeBase__axis0" />
+  <joint name="LeftToeBase_x" type="revolute">
+    <parent link="LeftFoot" />
+    <child link="LeftToeBase__axis0" />
+    <origin xyz="0.0000 -0.1323 -0.0506" rpy="0 0 0" />
+    <axis xyz="-1.0000 0.0000 0.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="LeftToeBase__axis1" />
+  <joint name="LeftToeBase_y" type="revolute">
+    <parent link="LeftToeBase__axis0" />
+    <child link="LeftToeBase__axis1" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 1.0000 0.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+  <link name="LeftToeBase" />
+  <joint name="LeftToeBase_z" type="revolute">
+    <parent link="LeftToeBase__axis1" />
+    <child link="LeftToeBase" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <axis xyz="0.0000 0.0000 1.0000" />
+    <limit lower="-3.141592654" upper="3.141592654" effort="1000" velocity="20" />
+  </joint>
+</robot>

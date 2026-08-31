@@ -735,10 +735,12 @@ def test_base_agent_save_writes_rank_and_score_checkpoints_without_real_dist(
         "last.ckpt",
         "custom_last.ckpt",
         "score_based.ckpt",
+        "best.ckpt",
         "custom_score_based.ckpt",
+        "custom_best.ckpt",
     ]
     assert inference_calls == [model_state]
-    assert saved[2][0] is saved[4][0]
+    assert saved[2][0] is saved[5][0] is saved[6][0]
     assert agent.fabric.calls == [
         ("on_save_checkpoint_start", (agent,)),
         ("on_save_checkpoint_end", (agent,)),

@@ -93,6 +93,27 @@ class EnvConfig:
         default=False,
         metadata={"help": "Show terrain markers during evaluation. Uses significant memory in IsaacGym."}
     )
+    record_reference_motion: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Expose the current full reference pose to the viewer recorder so "
+                "it can save a synchronized .gt.motion sidecar during inference."
+            )
+        },
+    )
+    head_orientation_feedback_gain: float = field(
+        default=0.0,
+        metadata={
+            "help": (
+                "World-head-orientation feedback for offline ego tracking. The "
+                "known target Head rotation is converted into a local Head PD "
+                "target relative to the simulated Neck2 pose. 0 disables it."
+            ),
+            "min": 0.0,
+            "max": 1.0,
+        },
+    )
     save_dir: str = field(
         default="",
         metadata={"help": "Directory for saving evaluation outputs."}

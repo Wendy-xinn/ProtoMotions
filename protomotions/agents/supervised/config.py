@@ -5,7 +5,7 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
+from typing import Dict, List, Optional
 
 from protomotions.agents.base_agent.config import BaseAgentConfig, BaseModelConfig
 from protomotions.agents.common.supervision import SupervisionLossConfig
@@ -58,4 +58,14 @@ class SupervisedAgentConfig(BaseAgentConfig):
     loss: SupervisionLossConfig = field(
         default_factory=SupervisionLossConfig,
         metadata={"help": "Supervised loss over model outputs and labels."},
+    )
+    auxiliary_losses: List[SupervisionLossConfig] = field(
+        default_factory=list,
+        metadata={"help": "Additional key-based distillation losses."},
+    )
+    expert_output_map: Dict[str, str] = field(
+        default_factory=dict,
+        metadata={
+            "help": "Map expert actor output keys to stored rollout target keys."
+        },
     )

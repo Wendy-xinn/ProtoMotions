@@ -23,7 +23,10 @@ from protomotions.agents.common.common import weight_init_trainable
 from protomotions.agents.common.supervision import compute_supervision_loss
 from protomotions.agents.optimizer.factory import instantiate_optimizer
 from protomotions.agents.base_agent.agent import BaseAgent
-from protomotions.agents.base_agent.model import BaseModel
+from protomotions.agents.base_agent.model import (
+    BaseModel,
+    ProtoMotionsTensorDictModule,
+)
 from protomotions.agents.supervised.config import RolloutActor
 from protomotions.agents.supervised.expert_utils import get_expert_actor_in_keys
 from protomotions.agents.utils.normalization import RunningMeanStd
@@ -217,29 +220,31 @@ class SupervisedAgent(BaseAgent):
             )
 
     def register_algorithm_experience_buffer_keys_from_obs(self, obs_td: TensorDict):
-        target_key = self.config.loss.target_key
-        if hasattr(self.experience_buffer, target_key):
+        losses = [self.config.loss, *getattr(self.config, "auxiliary_losses", [])]
+        missing_targets = [
+            loss.target_key
+            for loss in losses
+            if loss.enabled and not hasattr(self.experience_buffer, loss.target_key)
+        ]
+        if not missing_targets:
             return
-
-        if target_key in obs_td.keys():
-            value = obs_td[target_key]
-        else:
-            with self._eval_model_for_buffer_registration(), torch.no_grad():
-                output_td = self._collect_rollout_output(obs_td.clone())
-            if target_key not in output_td.keys():
+        with self._eval_model_for_buffer_registration(), torch.no_grad():
+            output_td = self._collect_rollout_output(obs_td.clone())
+        for target_key in dict.fromkeys(missing_targets):
+            source = obs_td if target_key in obs_td.keys() else output_td
+            if target_key not in source.keys():
                 raise KeyError(
-                    f"Supervised loss target_key '{target_key}' was not produced by "
+                    f"Supervised target_key '{target_key}' was not produced by "
                     f"the rollout output. Available keys: {list(output_td.keys())}"
                 )
-            value = output_td[target_key]
+            value = source[target_key]
+            self.experience_buffer.register_key(
+                target_key,
+                shape=value.shape[1:],
+                dtype=value.dtype,
+            )
 
-        self.experience_buffer.register_key(
-            target_key,
-            shape=value.shape[1:],
-            dtype=value.dtype,
-        )
-
-    def _collect_external_expert_action(self, obs_td: TensorDict) -> torch.Tensor:
+    def _collect_external_expert_labels(self, obs_td: TensorDict) -> Dict[str, Tensor]:
         expert_actor = self._external_expert_module()
         expert_in_keys = getattr(self, "expert_actor_in_keys", None)
         if not expert_in_keys:
@@ -248,15 +253,35 @@ class SupervisedAgent(BaseAgent):
             obs_td,
             expert_in_keys,
         )
-        expert_output_td = expert_actor(expert_obs_td)
+        if isinstance(expert_actor, ProtoMotionsTensorDictModule):
+            expert_output_td = expert_actor(expert_obs_td, log_internals=True)
+        else:
+            expert_output_td = expert_actor(expert_obs_td)
+        labels = {}
         if "mean_action" in expert_output_td.keys():
-            return expert_output_td["mean_action"]
-        if "action" in expert_output_td.keys():
-            return expert_output_td["action"]
-        raise KeyError(
-            "External expert actor must produce either 'mean_action' or 'action'. "
-            f"Available keys: {list(expert_output_td.keys())}"
+            labels["expert_actions"] = expert_output_td["mean_action"]
+        elif "action" in expert_output_td.keys():
+            labels["expert_actions"] = expert_output_td["action"]
+        else:
+            raise KeyError(
+                "External expert actor must produce either 'mean_action' or 'action'. "
+                f"Available keys: {list(expert_output_td.keys())}"
+            )
+        expert_output_map = getattr(
+            getattr(self, "config", None), "expert_output_map", {}
         )
+        for expert_key, target_key in expert_output_map.items():
+            if expert_key not in expert_output_td.keys():
+                raise KeyError(
+                    f"Expert output map requires '{expert_key}', but expert produced "
+                    f"{list(expert_output_td.keys())}"
+                )
+            labels[target_key] = expert_output_td[expert_key]
+        return labels
+
+    def _collect_external_expert_action(self, obs_td: TensorDict) -> torch.Tensor:
+        """Backward-compatible action-only view of external expert labels."""
+        return self._collect_external_expert_labels(obs_td)["expert_actions"]
 
     def _collect_rollout_output(self, obs_td: TensorDict) -> TensorDict:
         rollout_actor = self.config.rollout_actor
@@ -281,11 +306,11 @@ class SupervisedAgent(BaseAgent):
             output_td = self.model(obs_td)
 
         if has_external_expert:
-            expert_action = self._collect_external_expert_action(obs_td)
-            output_td["expert_actions"] = expert_action
+            expert_labels = self._collect_external_expert_labels(obs_td)
+            output_td.update(expert_labels)
             if rollout_actor == RolloutActor.EXPERT:
-                output_td["action"] = expert_action
-                output_td["mean_action"] = expert_action
+                output_td["action"] = expert_labels["expert_actions"]
+                output_td["mean_action"] = expert_labels["expert_actions"]
 
         return output_td
 
@@ -304,7 +329,15 @@ class SupervisedAgent(BaseAgent):
 
         # Store model outputs
         output_keys = list(
-            dict.fromkeys(list(self.model_output_keys) + [self.config.loss.target_key])
+            dict.fromkeys(
+                list(self.model_output_keys)
+                + [self.config.loss.target_key]
+                + [
+                    loss.target_key
+                    for loss in getattr(self.config, "auxiliary_losses", [])
+                    if loss.enabled
+                ]
+            )
         )
         for key in output_keys:
             if key in output_td:
@@ -351,6 +384,14 @@ class SupervisedAgent(BaseAgent):
             batch_td,
             self.config.loss,
         )
+        auxiliary_loss = supervised_loss * 0.0
+        auxiliary_log_dict = {}
+        for loss_config in getattr(self.config, "auxiliary_losses", []):
+            current_loss, current_log = compute_supervision_loss(
+                batch_td, loss_config
+            )
+            auxiliary_loss = auxiliary_loss + current_loss
+            auxiliary_log_dict.update(current_log)
         actions = (
             batch_td["privileged_action"]
             if "privileged_action" in batch_td.keys()
@@ -366,15 +407,17 @@ class SupervisedAgent(BaseAgent):
             log_prefix="model",
         )
 
-        loss = supervised_loss + extra_loss + model_loss
+        loss = supervised_loss + auxiliary_loss + extra_loss + model_loss
 
         log_dict = {
             "supervised/loss": supervised_loss.detach(),
+            "supervised/auxiliary_loss": auxiliary_loss.detach(),
             "supervised/extra_loss": extra_loss.detach(),
             "supervised/model_loss": model_loss.detach(),
             "losses/supervised_loss": loss.detach(),
         }
         log_dict.update(supervised_log_dict)
+        log_dict.update(auxiliary_log_dict)
         log_dict.update(model_log_dict)
         log_dict.update(extra_log_dict)
 

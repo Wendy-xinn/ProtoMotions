@@ -271,6 +271,25 @@ def create_parser():
         ),
     )
     parser.add_argument(
+        "--resume-offline-num-epochs",
+        type=positive_int,
+        default=None,
+        help=(
+            "Extend an existing offline-SFT run to this total epoch count while "
+            "restoring its model and optimizer state. Valid only for a true resume."
+        ),
+    )
+    parser.add_argument(
+        "--resume-training-max-iterations",
+        type=positive_int,
+        default=None,
+        help=(
+            "Extend an existing online run to this total iteration count while "
+            "restoring model, optimizer, and environment state. Valid only for "
+            "a true resume."
+        ),
+    )
+    parser.add_argument(
         "--overrides",
         nargs="*",
         default=[],
@@ -658,6 +677,45 @@ def main():
         agent_config = resolved_configs["agent"]
         motion_lib_config.validate()
 
+        resume_offline_num_epochs = getattr(args, "resume_offline_num_epochs", None)
+        if resume_offline_num_epochs is not None:
+            if not hasattr(agent_config, "offline_num_epochs"):
+                raise ValueError(
+                    "--resume-offline-num-epochs requires an offline-SFT agent config"
+                )
+            if resume_offline_num_epochs <= agent_config.offline_num_epochs:
+                raise ValueError(
+                    "--resume-offline-num-epochs must exceed the configured total "
+                    f"({agent_config.offline_num_epochs})"
+                )
+            log.info(
+                "RESUME: extending offline training from %s to %s total epochs",
+                agent_config.offline_num_epochs,
+                resume_offline_num_epochs,
+            )
+            agent_config.offline_num_epochs = resume_offline_num_epochs
+
+        resume_training_max_iterations = getattr(
+            args, "resume_training_max_iterations", None
+        )
+        if resume_training_max_iterations is not None:
+            configured_iterations = agent_config.training_max_iterations
+            if configured_iterations is None:
+                configured_iterations = agent_config.resolve_max_epochs(
+                    simulator_config.num_envs
+                )
+            if resume_training_max_iterations <= configured_iterations:
+                raise ValueError(
+                    "--resume-training-max-iterations must exceed the configured "
+                    f"total ({configured_iterations})"
+                )
+            log.info(
+                "RESUME: extending online training from %s to %s total iterations",
+                configured_iterations,
+                resume_training_max_iterations,
+            )
+            agent_config.training_max_iterations = resume_training_max_iterations
+
         args.checkpoint = checkpoint_path
         experiment_module = (
             None  # Intentionally skip loading - frozen config from pickle
@@ -694,6 +752,12 @@ def main():
             additional_args_fn(parser)
         
         args = parser.parse_args()
+        if getattr(args, "resume_offline_num_epochs", None) is not None:
+            raise ValueError("--resume-offline-num-epochs is valid only when resuming")
+        if getattr(args, "resume_training_max_iterations", None) is not None:
+            raise ValueError(
+                "--resume-training-max-iterations is valid only when resuming"
+            )
 
         # Get required config functions
         terrain_config_fn = getattr(experiment_module, "terrain_config")

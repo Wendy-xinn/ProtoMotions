@@ -30,6 +30,7 @@ from __future__ import annotations
 
 from typing import Optional, TYPE_CHECKING
 
+import torch
 from torch import Tensor
 
 from protomotions.envs.context_paths import FieldPath, NestedField
@@ -535,20 +536,55 @@ class SceneSurfaceContext:
 
     object_pos: Tensor = FieldPath()
     object_rot: Tensor = FieldPath()
+    object_vel: Tensor = FieldPath()
+    object_ang_vel: Tensor = FieldPath()
     neutral_pointclouds: Tensor = FieldPath()
+    neutral_pointcloud_normals: Tensor = FieldPath()
     object_valid_mask: Tensor = FieldPath()
+    object_bbox_extents: Tensor = FieldPath()
+    object_static_mask: Tensor = FieldPath()
+    object_class_ids: Tensor = FieldPath()
 
     def __init__(
         self,
         object_pos: Tensor,
         object_rot: Tensor,
+        object_vel: Tensor,
+        object_ang_vel: Tensor,
         neutral_pointclouds: Tensor,
         object_valid_mask: Tensor,
+        neutral_pointcloud_normals: Optional[Tensor] = None,
+        object_bbox_extents: Optional[Tensor] = None,
+        object_static_mask: Optional[Tensor] = None,
+        object_class_ids: Optional[Tensor] = None,
     ):
         self.object_pos = object_pos
         self.object_rot = object_rot
+        self.object_vel = object_vel
+        self.object_ang_vel = object_ang_vel
         self.neutral_pointclouds = neutral_pointclouds
         self.object_valid_mask = object_valid_mask
+        self.neutral_pointcloud_normals = (
+            torch.zeros_like(neutral_pointclouds)
+            if neutral_pointcloud_normals is None
+            else neutral_pointcloud_normals
+        )
+        shape = object_valid_mask.shape
+        self.object_bbox_extents = (
+            object_valid_mask.new_zeros((*shape, 3), dtype=object_pos.dtype)
+            if object_bbox_extents is None
+            else object_bbox_extents
+        )
+        self.object_static_mask = (
+            object_valid_mask.new_zeros(shape)
+            if object_static_mask is None
+            else object_static_mask
+        )
+        self.object_class_ids = (
+            object_valid_mask.new_zeros(shape, dtype=torch.long)
+            if object_class_ids is None
+            else object_class_ids
+        )
 
 
 # =============================================================================
@@ -606,6 +642,8 @@ class EnvContext:
     prev_contact_force_magnitudes: Optional[Tensor] = FieldPath()
     dt: float = FieldPath()
     progress_buf: Optional[Tensor] = FieldPath()
+    motion_ids: Optional[Tensor] = FieldPath()
+    motion_times: Optional[Tensor] = FieldPath()
 
     # Contact tracking
     contact_body_ids: Optional[Tensor] = FieldPath()
@@ -657,6 +695,8 @@ class EnvContext:
         current_contact_force_magnitudes: Optional[Tensor] = None,
         prev_contact_force_magnitudes: Optional[Tensor] = None,
         progress_buf: Optional[Tensor] = None,
+        motion_ids: Optional[Tensor] = None,
+        motion_times: Optional[Tensor] = None,
         contact_body_ids: Optional[Tensor] = None,
         non_termination_contact_body_ids: Optional[Tensor] = None,
         odom_scale: Optional[Tensor] = None,
@@ -725,6 +765,8 @@ class EnvContext:
         self.current_contact_force_magnitudes = current_contact_force_magnitudes
         self.prev_contact_force_magnitudes = prev_contact_force_magnitudes
         self.progress_buf = progress_buf
+        self.motion_ids = motion_ids
+        self.motion_times = motion_times
 
         # Contact tracking
         self.contact_body_ids = contact_body_ids

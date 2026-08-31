@@ -28,6 +28,63 @@ from pathlib import Path
 import yaml
 
 
+def normalized_motion_key(root: Path, filename: Path) -> str:
+    """Map a raw AMASS file to the normalized path used by split YAMLs."""
+    relative_path = filename.relative_to(root)
+    normalized_name = (
+        filename.name.replace(".npz", ".motion")
+        .replace(".pkl", ".motion")
+        .replace("-", "_")
+        .replace(" ", "_")
+        .replace("(", "_")
+        .replace(")", "_")
+    )
+    return str(relative_path.parent / normalized_name)
+
+
+def validate_inputs(
+    project_root: Path,
+    amass_root_dir: Path,
+    motion_configs: list[Path],
+    humanoid_type: str,
+) -> None:
+    """Fail early when body assets or YAML-referenced AMASS files are missing."""
+    model_prefix = "SMPLX" if humanoid_type == "smplx" else "SMPL"
+    model_files = [
+        project_root / "data" / "smpl" / f"{model_prefix}_{gender}.pkl"
+        for gender in ("NEUTRAL", "MALE", "FEMALE")
+    ]
+    missing_models = [str(path) for path in model_files if not path.is_file()]
+    if missing_models:
+        raise FileNotFoundError(
+            "Missing body model files:\n  " + "\n  ".join(missing_models)
+        )
+
+    raw_files = [
+        path
+        for path in amass_root_dir.rglob("*.npz")
+        if path.name != "shape.npz" and "stagei.npz" not in path.name
+    ]
+    available = {normalized_motion_key(amass_root_dir, path) for path in raw_files}
+    missing_motions = []
+    requested_count = 0
+    for config_path in motion_configs:
+        with config_path.open("r") as stream:
+            config = yaml.safe_load(stream)
+        requested = [motion["file"] for motion in config.get("motions", [])]
+        requested_count += len(requested)
+        missing_motions.extend(path for path in requested if path not in available)
+    if missing_motions:
+        preview = "\n  ".join(missing_motions[:20])
+        raise FileNotFoundError(
+            f"{len(missing_motions)} YAML motions are missing from AMASS. First entries:\n  {preview}"
+        )
+    print(
+        f"Preflight OK: {requested_count} YAML entries, {len(available)} raw motions, "
+        f"all {model_prefix} body models present."
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Convert AMASS data to packaged MotionLib .pt files (one per motion-config)",
@@ -89,6 +146,15 @@ Examples:
         action="store_true",
         help="Overwrite existing .motion files",
     )
+    parser.add_argument(
+        "--converted-root-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Directory for intermediate .motion files. Defaults to "
+            "<output_dir>/converted_motions instead of modifying raw AMASS."
+        ),
+    )
 
     # Optional arguments for motion_lib.py
     parser.add_argument(
@@ -122,6 +188,19 @@ Examples:
     # Get the project root (assuming this script is in data/scripts/)
     script_dir = Path(__file__).resolve().parent
     project_root = script_dir.parent.parent
+    converted_root_dir = (
+        args.converted_root_dir.resolve()
+        if args.converted_root_dir is not None
+        else (args.output_dir / "converted_motions").resolve()
+    )
+    converted_root_dir.mkdir(parents=True, exist_ok=True)
+
+    validate_inputs(
+        project_root=project_root,
+        amass_root_dir=args.amass_root_dir.resolve(),
+        motion_configs=args.motion_configs,
+        humanoid_type=args.humanoid_type,
+    )
 
     # Step 1: Convert AMASS to ProtoMotions .motion files (all configs at once)
     print("=" * 60)
@@ -137,6 +216,9 @@ Examples:
         args.humanoid_type,
         "--output-fps",
         str(args.output_fps),
+        "--output-root-dir",
+        str(converted_root_dir),
+        "--only-config-motions",
     ]
 
     if args.force_remake:
@@ -178,7 +260,7 @@ Examples:
         for motion in config.get("motions", []):
             original_file = motion["file"]
             # The file paths in the config are relative to amass_root_dir
-            absolute_path = args.amass_root_dir / original_file
+            absolute_path = converted_root_dir / original_file
             motion["file"] = str(absolute_path)
 
         # Write updated config to temp file

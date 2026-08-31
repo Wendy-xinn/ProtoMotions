@@ -40,7 +40,9 @@ dependencies = [
   "easydict>=1.10",
   "lightning>=2.3,<2.6",
   "matplotlib>=3.6",
-  "moviepy>=2,<3; python_version >= '3.9'",
+  # MoviePy 2.x caps Pillow below the 12.1.1 version required by Isaac Sim 6.
+  # Keep the 1.x line so the isaaclab extra can resolve in the same environment.
+  "moviepy>=1.0.3,<2.0.0.dev0; python_version >= '3.9'",
   "numpy>=1.21.1",
   "omegaconf==2.3.0",
   "PyYAML>=6",
@@ -84,14 +86,14 @@ newton = [
   "wandb==0.23.0",
 ]
 isaacgym = []
-# Install the pinned IsaacLab source checkout first, as documented in
-# installation.rst. These constraints prevent ProtoMotions from silently
-# downgrading that environment to the incompatible IsaacLab 2 / Isaac Sim 5
-# stack. Platform markers remain because Isaac Sim publishes Linux x86_64
-# wheels only.
+# Install the pinned IsaacLab source checkout with its ``isaacsim`` extra first,
+# as documented in installation.rst. Do not redeclare Isaac Sim here: resolving
+# its published metadata with ``uv pip`` would undo IsaacLab's uv overrides for
+# Newton and newton-usd-schemas. The IsaacLab constraint still prevents this
+# extra from silently targeting the incompatible IsaacLab 2 stack.
 isaaclab = [
   "isaaclab==12.0.0; sys_platform == 'linux' and platform_machine == 'x86_64'",
-  "isaacsim[all,extscache]==6.0.0.1; sys_platform == 'linux' and platform_machine == 'x86_64'",
+  "mujoco==3.8.0",
   "onnxruntime>=1.17",
   "tensordict==0.9.0",
   "torch>=2.11,<2.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
@@ -109,6 +111,18 @@ genesis = [
   "tensordict==0.9.0",
   "torch==2.5.0",
   "wandb==0.15.12",
+]
+scene-preprocess = [
+  # Offline QEM reduction for scanned static collision meshes. Keep this out
+  # of the simulator extras so users who do not prepare scene datasets do not
+  # inherit another compiled dependency.
+  "fast-simplification==0.1.13; python_version >= '3.9'",
+]
+scene-visualize = [
+  # Browser-based inspection of aligned motion, collision meshes and local
+  # scene samples. Kept separate because viser may require a host compiler for
+  # pyliblzfse on Python versions without a matching wheel.
+  "viser==0.2.7; python_version >= '3.9'",
 ]
 docs = [
   "myst-parser",

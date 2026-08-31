@@ -75,6 +75,10 @@ class MaskedMimicControlConfig(MimicControlConfig):
     # Probability that a pose is fully hidden (all bodies masked out)
     fully_hidden_pose_prob: float = 0.1
 
+    # Offline tasks may expose an ordered summary of the complete remaining
+    # camera trajectory instead of stochastic beta-distributed landmarks.
+    uniform_future_times: bool = False
+
 
 class MaskedMimicControl(MimicControl):
     """Control component for masked mimic tasks.
@@ -156,7 +160,7 @@ class MaskedMimicControl(MimicControl):
         if len(env_ids) == 0:
             return
         
-        # Initialize time steps from current time
+        # Initialize time steps from current time.
         new_times = self.env.motion_manager.motion_times[env_ids]
         self.target_times[env_ids] = new_times.unsqueeze(-1)
         
@@ -164,10 +168,15 @@ class MaskedMimicControl(MimicControl):
         self.masked_mimic_target_poses_masks[env_ids] = False
         self.masked_mimic_target_bodies_masks[env_ids] = False
         
-        # Sample all future steps
-        for _ in range(self.config.num_masked_future_steps):
-            self._shift_and_sample_time_steps(env_ids)
-            self._shift_and_sample_body_masks(env_ids)
+        if self.config.uniform_future_times:
+            self._set_uniform_future_times(env_ids)
+            for _ in range(self.config.num_masked_future_steps):
+                self._shift_and_sample_body_masks(env_ids)
+        else:
+            # Sample all future steps.
+            for _ in range(self.config.num_masked_future_steps):
+                self._shift_and_sample_time_steps(env_ids)
+                self._shift_and_sample_body_masks(env_ids)
         
         self._initialized = True
     
@@ -184,6 +193,11 @@ class MaskedMimicControl(MimicControl):
             return
         
         current_time = self.env.motion_manager.motion_times
+
+        if self.config.uniform_future_times:
+            env_ids = torch.arange(self.env.num_envs, device=self.env.device)
+            self._set_uniform_future_times(env_ids)
+            return
         
         # Check which envs have outdated target times
         outdated_target_times = current_time >= self.target_times[:, 0]
@@ -192,6 +206,22 @@ class MaskedMimicControl(MimicControl):
         if len(resample_env_ids) > 0:
             self._shift_and_sample_time_steps(resample_env_ids)
             self._shift_and_sample_body_masks(resample_env_ids)
+
+    def _set_uniform_future_times(self, env_ids: Tensor):
+        """Cover the complete remaining offline trajectory in chronological order."""
+        current_times = self.env.motion_manager.motion_times[env_ids]
+        motion_ids = self.env.motion_manager.motion_ids[env_ids]
+        motion_lengths = self.env.motion_lib.motion_lengths[motion_ids]
+        fractions = torch.linspace(
+            1.0 / self.config.num_masked_future_steps,
+            1.0,
+            self.config.num_masked_future_steps,
+            device=self.env.device,
+        )
+        remaining = (motion_lengths - current_times).clamp_min(0.0)
+        self.target_times[env_ids] = (
+            current_times.unsqueeze(-1) + remaining.unsqueeze(-1) * fractions
+        )
     
     def _shift_and_sample_time_steps(self, env_ids: Tensor):
         """Shift target time steps forward and sample a new future time step.

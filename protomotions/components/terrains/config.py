@@ -93,6 +93,14 @@ class TerrainConfig:
         default_factory=lambda: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
         metadata={"help": "Proportions: [smooth slope, rough slope, stairs up, stairs down, discrete, stepping, poles, flat]"}
     )
+    stairs_step_width: float = field(
+        default=0.31,
+        metadata={"help": "Procedural stair tread width in meters.", "min": 0.1}
+    )
+    stairs_step_height: Optional[float] = field(
+        default=None,
+        metadata={"help": "Fixed stair riser height in meters; None uses curriculum difficulty."}
+    )
     slope_threshold: float = field(
         default=0.9,
         metadata={"help": "Maximum slope angle threshold.", "min": 0.0, "max": 1.0}

@@ -364,7 +364,11 @@ class Terrain:
                 end_y = self.border + (subterrain_idx + 1) * self.width_per_env_pixels
 
                 slope = difficulty * 0.4
-                step_height = 0.05 + 0.175 * difficulty
+                step_height = (
+                    self.config.stairs_step_height
+                    if self.config.stairs_step_height is not None
+                    else 0.05 + 0.175 * difficulty
+                )
                 discrete_obstacles_height = 0.025 + difficulty * 0.15
                 stepping_stones_size = 2 - 1.8 * difficulty
                 if choice < self.proportions[0]:
@@ -391,7 +395,7 @@ class Terrain:
                         step_height *= -1
                     pyramid_stairs_subterrain(
                         subterrain,
-                        step_width=0.31,
+                        step_width=self.config.stairs_step_width,
                         step_height=step_height,
                         platform_size=3.0,
                     )

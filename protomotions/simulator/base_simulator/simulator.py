@@ -1177,6 +1177,28 @@ class Simulator(RecordingMixin, ABC):
         )
         return simulator_object_root_state
 
+    def set_object_root_state(
+        self,
+        object_state: ObjectState,
+        env_ids: torch.Tensor,
+        object_mask: Optional[torch.Tensor] = None,
+    ) -> None:
+        """Write object roots without resetting the robot or action history."""
+        if self.scene_lib.num_objects_per_scene == 0:
+            return
+        converted = object_state.convert_to_sim(self.data_conversion)
+        self._set_simulator_object_root_state(converted, env_ids, object_mask)
+
+    def _set_simulator_object_root_state(
+        self,
+        object_state: ObjectState,
+        env_ids: torch.Tensor,
+        object_mask: Optional[torch.Tensor] = None,
+    ) -> None:
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support object-only root writes"
+        )
+
     @abstractmethod
     def _get_simulator_object_root_state(
         self, env_ids: Optional[torch.Tensor] = None

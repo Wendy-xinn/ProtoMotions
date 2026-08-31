@@ -7,6 +7,7 @@
 
 from typing import Dict, List
 import argparse
+import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -82,6 +83,93 @@ parser.add_argument(
     default=[0.0, 0.0],
     help="Target x,y position to move all motions to (default: 0.0 0.0)",
 )
+parser.add_argument(
+    "--scene_file",
+    type=str,
+    default=None,
+    help="Motion-aligned SceneLib .pt file. Enables world-coordinate scene playback.",
+)
+parser.add_argument(
+    "--scene_asset_root",
+    type=str,
+    default=None,
+    help="Root for relative mesh paths in --scene_file (TRUMANS dataset root).",
+)
+parser.add_argument(
+    "--scene_index",
+    type=int,
+    default=None,
+    help="Scene/motion index to inspect. Defaults to --start_motion_index.",
+)
+parser.add_argument(
+    "--start_motion_index", type=int, default=0, help="Initial motion index."
+)
+parser.add_argument(
+    "--mesh_collision_approximation",
+    choices=["convexDecomposition", "convexHull", "boundingCube", "boundingSphere"],
+    default=None,
+    help="Optional collision approximation; requires USD scene assets.",
+)
+parser.add_argument(
+    "--contact_labels",
+    type=str,
+    default=None,
+    help="Per-clip contact NPZ used for PhysX reference-replay validation.",
+)
+parser.add_argument(
+    "--validate_contacts",
+    action="store_true",
+    help="Replay one motion once and compare geometric labels with simulator contacts.",
+)
+parser.add_argument(
+    "--contact_label_key",
+    choices=[
+        "source_contact",
+        "target_contact",
+        "target_physics_contact",
+        "intended_contact",
+        "training_contact",
+    ],
+    default="target_physics_contact",
+    help="Label tensor to compare. target_physics_contact matches PhysX contact offset.",
+)
+parser.add_argument(
+    "--contact_force_threshold",
+    type=float,
+    default=1.0,
+    help="PhysX net-force threshold in Newtons for a positive contact.",
+)
+parser.add_argument(
+    "--contact_object_mode",
+    choices=["kinematic", "dynamic"],
+    default="kinematic",
+    help=(
+        "During contact validation, drive scene objects kinematically along the "
+        "released trajectory or leave them as free dynamic bodies. Kinematic is "
+        "the deterministic reference-replay default."
+    ),
+)
+parser.add_argument(
+    "--validation_frames",
+    type=int,
+    default=0,
+    help="Frames to validate; 0 means one complete motion.",
+)
+parser.add_argument(
+    "--contact_report",
+    type=str,
+    default=None,
+    help="Output JSON report. Defaults beside --contact_labels.",
+)
+parser.add_argument(
+    "--replay_trace",
+    type=str,
+    default=None,
+    help=(
+        "NPZ output containing reference/actual body poses, forces and contact "
+        "booleans for Viser replay inspection. Defaults beside --contact_labels."
+    ),
+)
 args = parser.parse_args()
 
 # Import simulator before torch - isaacgym/isaaclab must be imported before torch
@@ -92,6 +180,7 @@ AppLauncher = import_simulator_before_torch(args.simulator)
 
 # Now safe to import everything else including torch
 import torch  # noqa: E402
+import numpy as np  # noqa: E402
 from protomotions.utils.hydra_replacement import get_class  # noqa: E402
 
 from protomotions.simulator.base_simulator.config import (  # noqa: E402
@@ -315,6 +404,19 @@ class MotionVisualizerSmoothness:
         metric: str = "nj",
         use_data_vel: bool = False,
         window_sec: float = 2.0,
+        scene_file: str = None,
+        scene_asset_root: str = None,
+        scene_index: int = None,
+        start_motion_index: int = 0,
+        mesh_collision_approximation: str = None,
+        contact_labels: str = None,
+        validate_contacts: bool = False,
+        contact_label_key: str = "target_physics_contact",
+        contact_force_threshold: float = 1.0,
+        contact_object_mode: str = "kinematic",
+        validation_frames: int = 0,
+        contact_report: str = None,
+        replay_trace: str = None,
     ):
         self.motion_files = [Path(f) for f in motion_files]
         self.robot_name = robot_name
@@ -328,6 +430,73 @@ class MotionVisualizerSmoothness:
         self.metric = metric
         self.use_data_vel = use_data_vel  # If False (default), use finite differences
         self.window_frames = max(4, int(round(window_sec * FPS)))
+        self.scene_file = scene_file
+        self.scene_asset_root = scene_asset_root
+        self.scene_index = start_motion_index if scene_index is None else scene_index
+        self.validate_contacts = validate_contacts
+        self.contact_label_key = contact_label_key
+        self.contact_force_threshold = contact_force_threshold
+        self.contact_object_mode = contact_object_mode
+        self.validation_frames = validation_frames
+        self.contact_report = Path(contact_report) if contact_report else None
+        self.replay_trace_path = Path(replay_trace) if replay_trace else None
+        self.contact_labels_path = Path(contact_labels) if contact_labels else None
+        self.contact_reference = None
+        self.contact_reference_by_object = None
+        self.contact_object_names = None
+        self.contact_tp = None
+        self.contact_fp = None
+        self.contact_fn = None
+        self.contact_pair_tp = None
+        self.contact_pair_fp = None
+        self.contact_pair_fn = None
+        self.validated_contact_frames = 0
+        self._trace_reference_pos = []
+        self._trace_pre_step_pos = []
+        self._trace_actual_pos = []
+        self._trace_reference_rot = []
+        self._trace_pre_step_rot = []
+        self._trace_actual_rot = []
+        self._trace_reference_object_pos = []
+        self._trace_pre_step_object_pos = []
+        self._trace_post_step_object_pos = []
+        self._trace_reference_object_rot = []
+        self._trace_pre_step_object_rot = []
+        self._trace_post_step_object_rot = []
+        self._trace_force = []
+        self._trace_object_force = []
+        self._trace_expected = []
+        self._trace_expected_by_object = []
+        self._trace_actual = []
+        self._trace_actual_by_object = []
+        if self.validate_contacts:
+            if self.num_envs != 1:
+                raise ValueError("Contact validation requires exactly one --motion_files input")
+            if self.scene_file is None:
+                raise ValueError("Contact validation requires --scene_file")
+            if self.contact_labels_path is None:
+                raise ValueError("Contact validation requires --contact_labels")
+            with np.load(self.contact_labels_path) as labels:
+                if self.contact_label_key not in labels.files:
+                    raise KeyError(
+                        f"{self.contact_label_key!r} is absent from {self.contact_labels_path}"
+                    )
+                reference = labels[self.contact_label_key]
+                if reference.ndim == 3:
+                    self.contact_reference_by_object = torch.from_numpy(
+                        reference.astype(bool)
+                    ).to(self.device)
+                    self.contact_object_names = labels["object_names"].astype(str)
+                    reference = reference.any(axis=-1)
+                self.contact_reference = torch.from_numpy(reference.astype(bool)).to(self.device)
+            if self.contact_report is None:
+                self.contact_report = self.contact_labels_path.with_name(
+                    f"{self.contact_labels_path.stem}.physx_{self.contact_label_key}.json"
+                )
+            if self.replay_trace_path is None:
+                self.replay_trace_path = self.contact_labels_path.with_name(
+                    f"{self.contact_labels_path.stem}.physx_{self.contact_label_key}.trace.npz"
+                )
 
         # Load motion libraries (.pt files)
         from protomotions.components.motion_lib import MotionLibConfig
@@ -339,15 +508,18 @@ class MotionVisualizerSmoothness:
             for motion_file in self.motion_files
         ]
 
-        # Move all motions to the specified origin
-        for i, motion_lib in enumerate(self.motion_libs):
-            target_xy = torch.tensor(args.origin_xy, device=self.device)
-            target_xy = target_xy + torch.tensor([1.0 * i, 0.0], device=self.device)
-            print(f"Translating motion library {i} to origin {target_xy}")
-            motion_lib.translate_all_motions_to_origin(target_xy)
+        # Scene-aware playback must retain the dataset's metric world frame.
+        if self.scene_file is None:
+            for i, motion_lib in enumerate(self.motion_libs):
+                target_xy = torch.tensor(args.origin_xy, device=self.device)
+                target_xy = target_xy + torch.tensor([1.0 * i, 0.0], device=self.device)
+                print(f"Translating motion library {i} to origin {target_xy}")
+                motion_lib.translate_all_motions_to_origin(target_xy)
+        else:
+            print("Preserving motion world coordinates for scene alignment")
 
         # Motion playback state
-        self.current_motion_idx = 0
+        self.current_motion_idx = start_motion_index
         self.current_frame = 0
         # Use the first motion lib to determine total motions and current motion length
         self.total_motions = self.motion_libs[0].num_motions()
@@ -356,7 +528,6 @@ class MotionVisualizerSmoothness:
             .get_motion_num_frames(None)[self.current_motion_idx]
             .item()
         )
-
         print(
             f"Loaded {len(self.motion_files)} motion files with {self.total_motions} motions each"
         )
@@ -370,6 +541,29 @@ class MotionVisualizerSmoothness:
 
         # Store kinematic info for later use
         self.kinematic_info = self.robot_cfg.kinematic_info
+        if self.validate_contacts:
+            body_count = self.kinematic_info.num_bodies
+            if tuple(self.contact_reference.shape) != (
+                self.current_motion_length,
+                body_count,
+            ):
+                raise ValueError(
+                    f"Contact labels {tuple(self.contact_reference.shape)} do not match "
+                    f"motion {(self.current_motion_length, body_count)}"
+                )
+            self.contact_tp = torch.zeros(body_count, dtype=torch.long)
+            self.contact_fp = torch.zeros(body_count, dtype=torch.long)
+            self.contact_fn = torch.zeros(body_count, dtype=torch.long)
+            if self.contact_reference_by_object is not None:
+                object_count = self.contact_reference_by_object.shape[-1]
+                pair_shape = (body_count, object_count)
+                self.contact_pair_tp = torch.zeros(pair_shape, dtype=torch.long)
+                self.contact_pair_fp = torch.zeros(pair_shape, dtype=torch.long)
+                self.contact_pair_fn = torch.zeros(pair_shape, dtype=torch.long)
+            # The visualizer normally creates no contact sensors. Validation
+            # needs one sensor per humanoid body. IsaacLab's filtered matrix
+            # preserves the body-by-object attribution used by scene labels.
+            self.robot_cfg.contact_bodies = list(self.kinematic_info.body_names)
 
         # Create simulator configuration using factory function
         self.simulator_cfg = simulator_config(
@@ -379,6 +573,12 @@ class MotionVisualizerSmoothness:
             num_envs=self.num_envs,
             experiment_name="motion_viz_smoothness",
         )
+        if (
+            self.validate_contacts
+            and self.contact_reference_by_object is not None
+            and simulator_type == "isaaclab"
+        ):
+            self.simulator_cfg.enable_body_contact_filter_matrix = True
 
         # Override robot asset settings for motion visualization
         self.robot_cfg.asset.disable_gravity = True
@@ -405,12 +605,44 @@ class MotionVisualizerSmoothness:
             "4": self.decrease_smoothness_threshold,  # Key 4: Decrease smoothness threshold
         }
 
-        # Create checkerboard ground for visualization
-        print("Creating checkerboard ground plane...")
-        scene_lib = create_checkerboard_ground(
-            self.num_envs, self.device, self.simulator_type
-        )
-        print("Checkerboard ground loaded successfully")
+        if self.scene_file is None:
+            print("Creating checkerboard ground plane...")
+            scene_lib = create_checkerboard_ground(
+                self.num_envs, self.device, self.simulator_type
+            )
+            print("Checkerboard ground loaded successfully")
+        else:
+            scene_lib = SceneLib(
+                config=SceneLibConfig(
+                    scene_file=self.scene_file,
+                    asset_root=self.scene_asset_root,
+                    scene_indices=[self.scene_index],
+                    subset_method=SubsetMethod.FIRST,
+                    replicate_method=ReplicationMethod.FIRST,
+                    mesh_collision_approximation=mesh_collision_approximation,
+                ),
+                num_envs=self.num_envs,
+                device=self.device,
+                terrain=None,
+            )
+            if self.validate_contacts and self.contact_object_mode == "kinematic":
+                for scene in scene_lib.scenes:
+                    for scene_object in scene.objects:
+                        scene_object.options.fix_base_link = True
+                print("Contact validation: driving all scene objects kinematically")
+            scene_motion_ids = scene_lib.get_humanoid_motion_ids()
+            if scene_motion_ids is not None and any(
+                motion_id != self.current_motion_idx for motion_id in scene_motion_ids
+            ):
+                raise ValueError(
+                    f"Scene {self.scene_index} maps to motion {scene_motion_ids}, "
+                    f"not requested motion {self.current_motion_idx}"
+                )
+            print(
+                f"Loaded physical scene {self.scene_index} with "
+                f"{scene_lib.num_objects_per_scene} object slots"
+            )
+        self.scene_lib = scene_lib
         terrain = None
 
         # Get simulator class and instantiate
@@ -447,8 +679,14 @@ class MotionVisualizerSmoothness:
         print("  '3' - Increase smoothness threshold by 1.5x (NumPad 3 for IsaacLab)")
         print("  '4' - Decrease smoothness threshold by 1.5x (NumPad 4 for IsaacLab)")
         print("Motion will play automatically and loop")
+        if self.validate_contacts:
+            print(
+                "Contact validation: "
+                f"label={self.contact_label_key}, force>{self.contact_force_threshold:g} N, "
+                f"report={self.contact_report}"
+            )
 
-        self.simulator.user_requested_reset = True
+        self.simulator.user_requested_reset = False
 
         # Speed control state
         self.speed_change_factor = 1.5  # 150% speed change
@@ -518,7 +756,10 @@ class MotionVisualizerSmoothness:
         """R key press: ask the main loop to advance to the next motion. Deferred via the flag (rather than
         switching here) so the heavy per-motion smoothness recompute runs on the loop, not in the key
         callback fired from inside the viewer's event poll."""
-        self.simulator.user_requested_reset = True
+        if self.scene_file is not None:
+            print("Scene-aware mode is fixed to one motion; restart with another --scene_index")
+        else:
+            self.simulator.user_requested_reset = True
 
     def _switch_to_next_motion(self):
         """Switch to the next motion in the dataset"""
@@ -795,7 +1036,19 @@ class MotionVisualizerSmoothness:
         #     current_state.rigid_body_ang_vel = torch.zeros(self.num_envs, rigid_body_pos.shape[1], 3, device=self.device)
 
         env_ids = torch.arange(self.num_envs, device=self.device)
-        self.simulator.reset_envs(current_state, env_ids=env_ids)
+        object_state = None
+        if self.scene_file is not None:
+            dt = float(self.motion_libs[0].motion_dt[self.current_motion_idx])
+            motion_time = torch.full(
+                (self.num_envs,), self.current_frame * dt, device=self.device
+            )
+            object_state = self.scene_lib.get_scene_pose(env_ids, motion_time)
+            object_state.root_vel = torch.zeros_like(object_state.root_pos)
+            object_state.root_ang_vel = torch.zeros_like(object_state.root_pos)
+        self.simulator.reset_envs(
+            current_state, new_object_states=object_state, env_ids=env_ids
+        )
+        return object_state
 
     def _get_updated_marker_positions(self):
         """Update marker positions to follow the specified bodies"""
@@ -881,10 +1134,12 @@ class MotionVisualizerSmoothness:
                 self._switch_to_next_motion()
                 self.simulator.user_requested_reset = False
 
-            # Calculate playback parameters based on speed
-            # For speed < 1.0: slow down by updating motion less frequently (frames_per_step > 1)
-            # For speed >= 1.0: speed up by skipping motion frames (frame_skip > 1)
-            if self.playback_speed < 1.0:
+            # Validation always visits every reference frame exactly once;
+            # playback_speed only removes wall-clock throttling in this mode.
+            if self.validate_contacts:
+                frames_per_step = 1
+                frame_skip = 1
+            elif self.playback_speed < 1.0:
                 frames_per_step = max(1, int(1.0 / self.playback_speed))
                 frame_skip = 1  # Don't skip frames when slowing down
             else:
@@ -894,12 +1149,23 @@ class MotionVisualizerSmoothness:
                 )  # Skip frames for fast playback
 
             # Update motion frame based on playback speed
+            replay_frame = None
+            pre_step_state = None
+            pre_step_object_state = None
+            reference_object_state = None
             if step_count % frames_per_step == 0:
                 # Get current pose for display
+                replay_frame = self.current_frame
                 dof_pos, rigid_body_pos, rigid_body_rot, _ = self._get_current_pose()
 
                 # Set robot pose
-                self._set_robot_pose(dof_pos, rigid_body_pos, rigid_body_rot)
+                reference_object_state = self._set_robot_pose(
+                    dof_pos, rigid_body_pos, rigid_body_rot
+                )
+                if self.validate_contacts and self.replay_trace_path is not None:
+                    pre_step_state = self.simulator.get_bodies_state()
+                    if self.scene_file is not None:
+                        pre_step_object_state = self.simulator.get_object_root_state()
 
                 # Advance frame with skip for fast playback
                 self.current_frame += frame_skip
@@ -918,6 +1184,112 @@ class MotionVisualizerSmoothness:
 
             self.simulator.step(_common_actions, markers_callback=lambda: marker_states)
 
+            if self.validate_contacts and replay_frame is not None:
+                contact_state = self.simulator.get_bodies_contact_buf()
+                force = torch.linalg.norm(
+                    contact_state.rigid_body_contact_forces[0], dim=-1
+                )
+                actual = force > self.contact_force_threshold
+                expected = self.contact_reference[replay_frame]
+                object_force = None
+                actual_by_object = None
+                expected_by_object = None
+                if self.contact_reference_by_object is not None:
+                    if self.simulator_type != "isaaclab":
+                        raise RuntimeError(
+                            "Per-object contact validation currently requires IsaacLab."
+                        )
+                    filtered = self.simulator.get_body_filtered_contact_forces()
+                    # SceneLib object filters are contiguous and preserve scene
+                    # slot order. Terrain, when present, occupies the prefix.
+                    object_count = self.contact_reference_by_object.shape[-1]
+                    object_offset = self.simulator.body_contact_object_filter_offset
+                    if filtered.shape[2] < object_count + object_offset:
+                        raise RuntimeError(
+                            "Filtered contact matrix has too few partners: "
+                            f"{filtered.shape[2]} for {object_count} labeled objects."
+                        )
+                    object_force = torch.linalg.norm(
+                        filtered[
+                            0,
+                            :,
+                            object_offset : object_offset + object_count,
+                        ],
+                        dim=-1,
+                    )
+                    actual_by_object = object_force > self.contact_force_threshold
+                    expected_by_object = self.contact_reference_by_object[replay_frame]
+                    self.contact_pair_tp += (actual_by_object & expected_by_object).cpu()
+                    self.contact_pair_fp += (actual_by_object & ~expected_by_object).cpu()
+                    self.contact_pair_fn += (~actual_by_object & expected_by_object).cpu()
+                if self.replay_trace_path is not None:
+                    actual_state = self.simulator.get_bodies_state()
+                    self._trace_reference_pos.append(
+                        rigid_body_pos[0].detach().cpu().numpy()
+                    )
+                    self._trace_actual_pos.append(
+                        actual_state.rigid_body_pos[0].detach().cpu().numpy()
+                    )
+                    self._trace_pre_step_pos.append(
+                        pre_step_state.rigid_body_pos[0].detach().cpu().numpy()
+                    )
+                    self._trace_reference_rot.append(
+                        rigid_body_rot[0].detach().cpu().numpy()
+                    )
+                    self._trace_actual_rot.append(
+                        actual_state.rigid_body_rot[0].detach().cpu().numpy()
+                    )
+                    self._trace_pre_step_rot.append(
+                        pre_step_state.rigid_body_rot[0].detach().cpu().numpy()
+                    )
+                    if reference_object_state is not None:
+                        post_object_state = self.simulator.get_object_root_state()
+                        self._trace_reference_object_pos.append(
+                            reference_object_state.root_pos[0].detach().cpu().numpy()
+                        )
+                        self._trace_pre_step_object_pos.append(
+                            pre_step_object_state.root_pos[0].detach().cpu().numpy()
+                        )
+                        self._trace_post_step_object_pos.append(
+                            post_object_state.root_pos[0].detach().cpu().numpy()
+                        )
+                        self._trace_reference_object_rot.append(
+                            reference_object_state.root_rot[0].detach().cpu().numpy()
+                        )
+                        self._trace_pre_step_object_rot.append(
+                            pre_step_object_state.root_rot[0].detach().cpu().numpy()
+                        )
+                        self._trace_post_step_object_rot.append(
+                            post_object_state.root_rot[0].detach().cpu().numpy()
+                        )
+                    self._trace_force.append(force.detach().cpu().numpy())
+                    if object_force is not None:
+                        self._trace_object_force.append(
+                            object_force.detach().cpu().numpy()
+                        )
+                    self._trace_expected.append(expected.detach().cpu().numpy())
+                    if expected_by_object is not None:
+                        self._trace_expected_by_object.append(
+                            expected_by_object.detach().cpu().numpy()
+                        )
+                    self._trace_actual.append(actual.detach().cpu().numpy())
+                    if actual_by_object is not None:
+                        self._trace_actual_by_object.append(
+                            actual_by_object.detach().cpu().numpy()
+                        )
+                self.contact_tp += (actual & expected).cpu()
+                self.contact_fp += (actual & ~expected).cpu()
+                self.contact_fn += (~actual & expected).cpu()
+                self.validated_contact_frames += 1
+                requested_frames = (
+                    self.validation_frames
+                    if self.validation_frames > 0
+                    else self.current_motion_length
+                )
+                if self.validated_contact_frames >= requested_frames:
+                    self._write_contact_validation_report()
+                    return
+
             step_count += 1
 
             # Throttle to real-time (adjusted by playback speed)
@@ -925,6 +1297,171 @@ class MotionVisualizerSmoothness:
             sleep_time = target_dt / max(self.playback_speed, 0.01) - elapsed
             if sleep_time > 0:
                 time.sleep(sleep_time)
+
+    def _write_contact_validation_report(self) -> None:
+        if self.replay_trace_path is not None and self._trace_reference_pos:
+            self.replay_trace_path.parent.mkdir(parents=True, exist_ok=True)
+            np.savez_compressed(
+                self.replay_trace_path,
+                frame_indices=np.arange(len(self._trace_reference_pos), dtype=np.int32),
+                reference_body_pos=np.asarray(self._trace_reference_pos, dtype=np.float32),
+                pre_step_body_pos=np.asarray(self._trace_pre_step_pos, dtype=np.float32),
+                actual_body_pos=np.asarray(self._trace_actual_pos, dtype=np.float32),
+                reference_body_rot=np.asarray(self._trace_reference_rot, dtype=np.float32),
+                pre_step_body_rot=np.asarray(self._trace_pre_step_rot, dtype=np.float32),
+                actual_body_rot=np.asarray(self._trace_actual_rot, dtype=np.float32),
+                reference_object_pos=np.asarray(
+                    self._trace_reference_object_pos, dtype=np.float32
+                ),
+                pre_step_object_pos=np.asarray(
+                    self._trace_pre_step_object_pos, dtype=np.float32
+                ),
+                post_step_object_pos=np.asarray(
+                    self._trace_post_step_object_pos, dtype=np.float32
+                ),
+                reference_object_rot=np.asarray(
+                    self._trace_reference_object_rot, dtype=np.float32
+                ),
+                pre_step_object_rot=np.asarray(
+                    self._trace_pre_step_object_rot, dtype=np.float32
+                ),
+                post_step_object_rot=np.asarray(
+                    self._trace_post_step_object_rot, dtype=np.float32
+                ),
+                contact_force=np.asarray(self._trace_force, dtype=np.float32),
+                object_contact_force=np.asarray(
+                    self._trace_object_force, dtype=np.float32
+                ),
+                expected_contact=np.asarray(self._trace_expected, dtype=bool),
+                expected_contact_by_object=np.asarray(
+                    self._trace_expected_by_object, dtype=bool
+                ),
+                actual_contact=np.asarray(self._trace_actual, dtype=bool),
+                actual_contact_by_object=np.asarray(
+                    self._trace_actual_by_object, dtype=bool
+                ),
+                body_names=np.asarray(self.kinematic_info.body_names, dtype=str),
+                object_names=np.asarray(
+                    self.contact_object_names
+                    if self.contact_object_names is not None
+                    else [],
+                    dtype=str,
+                ),
+                contact_force_threshold=np.asarray(
+                    self.contact_force_threshold, dtype=np.float32
+                ),
+            )
+        tp = self.contact_tp.numpy()
+        fp = self.contact_fp.numpy()
+        fn = self.contact_fn.numpy()
+        precision = tp / np.maximum(tp + fp, 1)
+        recall = tp / np.maximum(tp + fn, 1)
+        f1 = 2.0 * precision * recall / np.maximum(precision + recall, 1.0e-12)
+        active = (tp + fp + fn) > 0
+        total_tp, total_fp, total_fn = int(tp.sum()), int(fp.sum()), int(fn.sum())
+        micro_precision = total_tp / max(total_tp + total_fp, 1)
+        micro_recall = total_tp / max(total_tp + total_fn, 1)
+        micro_f1 = (
+            2.0 * micro_precision * micro_recall
+            / max(micro_precision + micro_recall, 1.0e-12)
+        )
+        report = {
+            "schema_version": 1,
+            "motion_file": str(self.motion_files[0]),
+            "scene_file": str(self.scene_file),
+            "scene_index": self.scene_index,
+            "contact_labels": str(self.contact_labels_path),
+            "label_key": self.contact_label_key,
+            "force_threshold_n": self.contact_force_threshold,
+            "frames": self.validated_contact_frames,
+            "micro": {
+                "precision": micro_precision,
+                "recall": micro_recall,
+                "f1": micro_f1,
+                "tp": total_tp,
+                "fp": total_fp,
+                "fn": total_fn,
+            },
+            "macro_active_bodies": {
+                "precision": float(precision[active].mean()) if active.any() else 0.0,
+                "recall": float(recall[active].mean()) if active.any() else 0.0,
+                "f1": float(f1[active].mean()) if active.any() else 0.0,
+            },
+            "per_body": {
+                name: {
+                    "precision": float(precision[index]),
+                    "recall": float(recall[index]),
+                    "f1": float(f1[index]),
+                    "tp": int(tp[index]),
+                    "fp": int(fp[index]),
+                    "fn": int(fn[index]),
+                }
+                for index, name in enumerate(self.kinematic_info.body_names)
+            },
+        }
+        if self.contact_pair_tp is not None:
+            pair_tp = self.contact_pair_tp.numpy()
+            pair_fp = self.contact_pair_fp.numpy()
+            pair_fn = self.contact_pair_fn.numpy()
+            pair_total_tp = int(pair_tp.sum())
+            pair_total_fp = int(pair_fp.sum())
+            pair_total_fn = int(pair_fn.sum())
+            pair_precision = pair_total_tp / max(pair_total_tp + pair_total_fp, 1)
+            pair_recall = pair_total_tp / max(pair_total_tp + pair_total_fn, 1)
+            pair_f1 = (
+                2.0
+                * pair_precision
+                * pair_recall
+                / max(pair_precision + pair_recall, 1.0e-12)
+            )
+            report["object_mode"] = self.contact_object_mode
+            report["pair_micro"] = {
+                "precision": pair_precision,
+                "recall": pair_recall,
+                "f1": pair_f1,
+                "tp": pair_total_tp,
+                "fp": pair_total_fp,
+                "fn": pair_total_fn,
+            }
+            report["per_object"] = {}
+            for object_id, object_name in enumerate(self.contact_object_names):
+                object_tp = int(pair_tp[:, object_id].sum())
+                object_fp = int(pair_fp[:, object_id].sum())
+                object_fn = int(pair_fn[:, object_id].sum())
+                object_precision = object_tp / max(object_tp + object_fp, 1)
+                object_recall = object_tp / max(object_tp + object_fn, 1)
+                object_f1 = (
+                    2.0
+                    * object_precision
+                    * object_recall
+                    / max(object_precision + object_recall, 1.0e-12)
+                )
+                report["per_object"][str(object_name)] = {
+                    "precision": object_precision,
+                    "recall": object_recall,
+                    "f1": object_f1,
+                    "tp": object_tp,
+                    "fp": object_fp,
+                    "fn": object_fn,
+                }
+            print(
+                "PhysX object-pair validation: "
+                f"precision={pair_precision:.3f}, recall={pair_recall:.3f}, "
+                f"F1={pair_f1:.3f}"
+            )
+        self.contact_report.parent.mkdir(parents=True, exist_ok=True)
+        self.contact_report.write_text(
+            json.dumps(report, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        print(
+            "PhysX contact validation: "
+            f"precision={micro_precision:.3f}, recall={micro_recall:.3f}, "
+            f"F1={micro_f1:.3f} ({self.validated_contact_frames} frames)"
+        )
+        print(f"Wrote {self.contact_report}")
+        if self.replay_trace_path is not None:
+            print(f"Wrote {self.replay_trace_path}")
 
 
 def main():
@@ -957,6 +1494,19 @@ def main():
         metric=args.metric,
         use_data_vel=args.use_data_vel,
         window_sec=args.window_sec,
+        scene_file=args.scene_file,
+        scene_asset_root=args.scene_asset_root,
+        scene_index=args.scene_index,
+        start_motion_index=args.start_motion_index,
+        mesh_collision_approximation=args.mesh_collision_approximation,
+        contact_labels=args.contact_labels,
+        validate_contacts=args.validate_contacts,
+        contact_label_key=args.contact_label_key,
+        contact_force_threshold=args.contact_force_threshold,
+        contact_object_mode=args.contact_object_mode,
+        validation_frames=args.validation_frames,
+        contact_report=args.contact_report,
+        replay_trace=args.replay_trace,
     )
 
     try:

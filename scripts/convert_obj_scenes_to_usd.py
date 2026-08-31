@@ -78,12 +78,12 @@ def obj_to_usda(obj_path: Path, usda_path: Path) -> None:
     )
 
 
-def collect_mesh_paths(scene_file: str, asset_root: str):
-    """Extract unique mesh paths from a scene .pt file."""
+def collect_mesh_assets(scene_file: str, asset_root: str):
+    """Extract unique mesh paths and whether each is ever used dynamically."""
     data = torch.load(scene_file, weights_only=False, map_location="cpu")
     scenes = data.get("original_scenes", data) if isinstance(data, dict) else data
 
-    paths = set()
+    assets = {}
     for scene in scenes:
         objects = scene.get("objects", []) if isinstance(scene, dict) else []
         for obj in objects:
@@ -91,8 +91,15 @@ def collect_mesh_paths(scene_file: str, asset_root: str):
                 p = obj["object_path"]
                 if not os.path.isabs(p):
                     p = os.path.join(asset_root, p)
-                paths.add(p)
-    return sorted(paths)
+                p = str(Path(p).resolve())
+                fixed = bool(obj.get("options", {}).get("fix_base_link", False))
+                assets[p] = assets.get(p, False) or not fixed
+    return dict(sorted(assets.items()))
+
+
+def collect_mesh_paths(scene_file: str, asset_root: str):
+    """Backward-compatible path-only view of :func:`collect_mesh_assets`."""
+    return list(collect_mesh_assets(scene_file, asset_root))
 
 
 def main():
@@ -108,7 +115,15 @@ def main():
     parser.add_argument(
         "--bake-collision",
         action="store_true",
-        help="Also bake collision approximation into USD files",
+        help="Legacy: bake the same approximation for every mesh, including rooms",
+    )
+    parser.add_argument(
+        "--bake-dynamic-collision",
+        action="store_true",
+        help=(
+            "Bake convex collision only for movable objects; static room meshes "
+            "retain triangle-mesh collision"
+        ),
     )
     parser.add_argument(
         "--approximation",
@@ -118,10 +133,18 @@ def main():
     parser.add_argument("--max-convex-hulls", type=int, default=32)
     parser.add_argument("--hull-vertex-limit", type=int, default=64)
     parser.add_argument("--voxel-resolution", type=int, default=300000)
-    parser.add_argument(
+    output_group = parser.add_mutually_exclusive_group()
+    output_group.add_argument(
         "--update-scene-file",
         action="store_true",
-        help="Rewrite scene .pt to reference .usda paths instead of .urdf/.obj",
+        help="Legacy: rewrite the input scene .pt with USD references",
+    )
+    output_group.add_argument(
+        "--output-scene-file",
+        help=(
+            "Write a separate simulation scene .pt with USD references. "
+            "Recommended so the inspectable mesh pack remains unchanged."
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -132,7 +155,17 @@ def main():
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-    mesh_paths = collect_mesh_paths(args.scene_file, args.asset_root)
+    # PhysxSchema is registered by Kit, not by the standalone usd-core wheel.
+    # Start the smallest headless Isaac app only for collision baking; plain
+    # OBJ -> USDA conversion remains a lightweight offline operation.
+    simulation_app = None
+    if (args.bake_collision or args.bake_dynamic_collision) and not args.dry_run:
+        from isaaclab.app import AppLauncher
+
+        simulation_app = AppLauncher({"headless": True}).app
+
+    mesh_assets = collect_mesh_assets(args.scene_file, args.asset_root)
+    mesh_paths = list(mesh_assets)
     log.info("Found %d unique mesh references in %s", len(mesh_paths), args.scene_file)
 
     converted = 0
@@ -179,9 +212,53 @@ def main():
 
     log.info("Converted: %d, Skipped: %d", converted, skipped)
 
-    # Optionally update scene file to reference .usda paths
-    if args.update_scene_file and not args.dry_run:
-        log.info("Updating scene file paths to .usda ...")
+    # Optionally bake collision into the USDA files
+    baked_dynamic_paths = {}
+    missing_dynamic_collision_assets = []
+    if (args.bake_collision or args.bake_dynamic_collision) and not args.dry_run:
+        from protomotions.simulator.isaaclab.utils.collision_baking import (
+            ensure_baked_collision_usd,
+        )
+
+        log.info("Baking collision approximations...")
+        for path_str in mesh_paths:
+            if args.bake_dynamic_collision and not args.bake_collision:
+                if not mesh_assets[path_str]:
+                    continue
+            p = Path(path_str)
+            # Use the USDA we just created (or existing USD)
+            if p.suffix.lower() in (".urdf", ".obj"):
+                usda_path = p.with_suffix(".usda")
+            else:
+                usda_path = p
+
+            if not usda_path.exists():
+                log.warning("No USD found for baking: %s", usda_path)
+                if mesh_assets[path_str]:
+                    missing_dynamic_collision_assets.append(str(usda_path))
+                continue
+
+            baked_path = ensure_baked_collision_usd(
+                usda_path,
+                args.approximation,
+                max_convex_hulls=args.max_convex_hulls,
+                hull_vertex_limit=args.hull_vertex_limit,
+                voxel_resolution=args.voxel_resolution,
+            )
+            if mesh_assets[path_str]:
+                baked_dynamic_paths[str(usda_path.resolve())] = baked_path
+                if not Path(baked_path).exists():
+                    missing_dynamic_collision_assets.append(str(baked_path))
+        log.info("Collision baking complete.")
+        if missing_dynamic_collision_assets:
+            raise RuntimeError(
+                "Dynamic collision preparation is incomplete; missing: "
+                + ", ".join(missing_dynamic_collision_assets)
+            )
+
+    # Update references only after all requested simulation assets exist.
+    if (args.update_scene_file or args.output_scene_file) and not args.dry_run:
+        log.info("Writing scene-file references to simulation USD assets ...")
         data = torch.load(args.scene_file, weights_only=False, map_location="cpu")
         scenes_key = (
             "original_scenes"
@@ -194,51 +271,34 @@ def main():
         for scene in scenes:
             objects = scene.get("objects", []) if isinstance(scene, dict) else []
             for obj in objects:
-                if isinstance(obj, dict) and "object_path" in obj:
-                    p = obj["object_path"]
-                    if p.endswith(".urdf") or p.endswith(".obj"):
-                        new_p = Path(p).with_suffix(".usda")
-                        # Verify the USDA exists (resolve relative path)
-                        abs_new = (
-                            new_p
-                            if new_p.is_absolute()
-                            else Path(args.asset_root) / new_p
-                        )
-                        if abs_new.exists():
-                            obj["object_path"] = str(new_p)
-                            updated += 1
+                if not isinstance(obj, dict) or "object_path" not in obj:
+                    continue
+                old_path = Path(obj["object_path"])
+                abs_old = (
+                    old_path
+                    if old_path.is_absolute()
+                    else Path(args.asset_root) / old_path
+                ).resolve()
+                usda_path = abs_old.with_suffix(".usda")
+                fixed = bool(obj.get("options", {}).get("fix_base_link", False))
+                target_path = usda_path
+                if not fixed and str(usda_path) in baked_dynamic_paths:
+                    target_path = baked_dynamic_paths[str(usda_path)]
+                if not target_path.exists():
+                    continue
+                try:
+                    obj["object_path"] = str(target_path.relative_to(args.asset_root))
+                except ValueError:
+                    obj["object_path"] = str(target_path)
+                updated += 1
 
-        out_path = args.scene_file  # overwrite in place
-        torch.save(data, out_path)
-        log.info("Updated %d object paths in %s", updated, out_path)
+        target_scene_file = Path(args.output_scene_file or args.scene_file).resolve()
+        target_scene_file.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(data, target_scene_file)
+        log.info("Updated %d object paths in %s", updated, target_scene_file)
 
-    # Optionally bake collision into the USDA files
-    if args.bake_collision and not args.dry_run:
-        from protomotions.simulator.isaaclab.utils.collision_baking import (
-            ensure_baked_collision_usd,
-        )
-
-        log.info("Baking collision approximations...")
-        for path_str in mesh_paths:
-            p = Path(path_str)
-            # Use the USDA we just created (or existing USD)
-            if p.suffix.lower() in (".urdf", ".obj"):
-                usda_path = p.with_suffix(".usda")
-            else:
-                usda_path = p
-
-            if not usda_path.exists():
-                log.warning("No USD found for baking: %s", usda_path)
-                continue
-
-            ensure_baked_collision_usd(
-                usda_path,
-                args.approximation,
-                max_convex_hulls=args.max_convex_hulls,
-                hull_vertex_limit=args.hull_vertex_limit,
-                voxel_resolution=args.voxel_resolution,
-            )
-        log.info("Collision baking complete.")
+    if simulation_app is not None:
+        simulation_app.close()
 
 
 if __name__ == "__main__":

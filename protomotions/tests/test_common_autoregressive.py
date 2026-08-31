@@ -119,6 +119,25 @@ def test_autoregressive_generation_can_use_prior_constraint_each_step():
     assert torch.equal(calls[1][0], torch.full((2, 1), 2))
 
 
+def test_autoregressive_generation_can_select_greedy_tokens():
+    model = DiscreteAutoregressiveTransformer(_config())
+
+    def next_logits(context, token_indices=None, **kwargs):
+        del context, token_indices, kwargs
+        return torch.tensor([[0.0, 1.0, 4.0, 2.0, 3.0]])
+
+    model.next_logits_from_context = next_logits
+    generated, _, logps = model.generate_from_context(
+        torch.zeros(1, model.d_model),
+        num_tokens=2,
+        top_p=1.0,
+        greedy=True,
+    )
+
+    assert torch.equal(generated, torch.full((1, 2), 2))
+    assert torch.all(torch.isfinite(logps))
+
+
 def test_autoregressive_transformer_can_return_generated_token_logprobs():
     config = _config()
     config.logprob_key = "token_logp"

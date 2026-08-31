@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import Dict, Optional, Tuple
 
 import torch
+import torch.nn.functional as F
 from tensordict import TensorDict
 
 from protomotions.agents.base_agent.model import (
@@ -62,6 +63,11 @@ class MaskedMimicModel(BaseModel):
         self.in_keys = list(
             dict.fromkeys(self._prior.in_keys + self._encoder.in_keys + trunk_in_keys)
         )
+        interaction_target_key = getattr(
+            self.config, "interaction_target_key", None
+        )
+        if interaction_target_key is not None:
+            self.in_keys.append(interaction_target_key)
         self.out_keys = [
             "action",
             "privileged_action",
@@ -183,6 +189,60 @@ class MaskedMimicModel(BaseModel):
         trunk_in_keys = [key for key in self._trunk.in_keys if key != VAE_LATENT_KEY]
         return list(dict.fromkeys(self._prior.in_keys + trunk_in_keys))
 
+    def _interaction_auxiliary_loss(self, tensordict, zero_loss):
+        config = self.config
+        target_key = getattr(config, "interaction_target_key", None)
+        num_targets = getattr(config, "interaction_num_targets", 0)
+        distance_key = getattr(
+            config,
+            "interaction_distance_prediction_key",
+            "student_scene_distance_pred",
+        )
+        contact_key = getattr(
+            config,
+            "interaction_contact_prediction_key",
+            "student_scene_contact_logits",
+        )
+        enabled = (
+            target_key is not None
+            and num_targets > 0
+            and target_key in tensordict
+            and distance_key in tensordict
+            and contact_key in tensordict
+        )
+        if not enabled:
+            return zero_loss * 0.0, {}
+        target = tensordict[target_key].reshape(
+            tensordict.batch_size[0], num_targets, 2
+        )
+        distance_target = target[..., 0]
+        contact_target = target[..., 1]
+        distance_pred = tensordict[distance_key]
+        contact_logits = tensordict[contact_key]
+        distance_loss = F.smooth_l1_loss(distance_pred, distance_target)
+        bce = F.binary_cross_entropy_with_logits(
+            contact_logits, contact_target, reduction="none"
+        )
+        probability = torch.sigmoid(contact_logits)
+        probability_of_target = torch.where(
+            contact_target > 0.5, probability, 1.0 - probability
+        )
+        contact_loss = (
+            (1.0 - probability_of_target).pow(
+                getattr(config, "interaction_contact_focal_gamma", 2.0)
+            )
+            * bce
+        ).mean()
+        weighted = (
+            getattr(config, "interaction_distance_loss_weight", 0.0) * distance_loss
+            + getattr(config, "interaction_contact_loss_weight", 0.0) * contact_loss
+        )
+        return weighted, {
+            "scene_student/distance_loss": distance_loss.detach(),
+            "scene_student/contact_focal_loss": contact_loss.detach(),
+            "scene_student/interaction_loss": weighted.detach(),
+        }
+
     def kl_loss(self, tensordict: TensorDict) -> torch.Tensor:
         prior_mu_key, prior_logvar_key = self._prior.out_keys
         encoder_mu_key, encoder_logvar_key = self._encoder.out_keys
@@ -227,6 +287,11 @@ class MaskedMimicModel(BaseModel):
             zero_loss=zero_loss,
             log_prefix=log_prefix,
         )
+        interaction_loss, interaction_log_dict = self._interaction_auxiliary_loss(
+            tensordict, zero_loss
+        )
+        loss = loss + interaction_loss
+        log_dict.update(interaction_log_dict)
         if getattr(self.config.vae, "kld_schedule", None) is None:
             return loss, log_dict
 
