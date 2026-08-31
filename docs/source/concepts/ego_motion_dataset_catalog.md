@@ -83,9 +83,58 @@ short translation, in-place upper-body activity, in-place lower-body activity,
 leaning, and general in-place motion. These labels support balancing and
 duplicate analysis; they must not be presented as ground-truth semantic actions.
 
+The current `sft_diverse_800_192` distribution is:
+
+| coarse action type | clips | operational definition |
+|---|---:|---|
+| short translation with upper-body activity | 261 | root span 0.25--0.75 m plus raised/horizontal/close hands |
+| large translation with upper-body activity | 180 | root span at least 0.75 m plus upper-body activity |
+| in-place lower-body activity | 123 | root span below 0.25 m with a deep knee bend |
+| short translation | 86 | root span 0.25--0.75 m without a salient upper-body tag |
+| in-place upper-body activity | 81 | root span below 0.25 m with salient arm/hand activity |
+| in-place general motion | 31 | root span below 0.25 m without another salient tag |
+| large translation | 30 | root span at least 0.75 m without a salient upper-body tag |
+| in-place torso leaning | 8 | root span below 0.25 m with torso leaning |
+
+`Large translation` is not automatically labelled walking: it can include side
+steps, turning with displacement, or another translated interaction. Likewise,
+the 91 observed pose-motion signatures are combinations of one displacement tag
+and the detected posture tags. They are feature signatures, not 91 independent
+semantic action classes. Of these signatures, 66 occur at least twice and 39
+occur at least five times.
+
 Text sequences with exact recording length are aligned to clip frames after
 removing the repeated frame at each JSON segment boundary. Length-mismatched
 sequences are marked `recording_level_only` and cannot provide clip captions.
+
+## Evidence scope
+
+This dataset is sufficient to establish:
+
+- whether both pipelines train end to end beyond a 50-clip memorization test;
+- whether the SMPL teacher can track complete 192-frame clips across the selected
+  indoor motion distribution;
+- whether GPC student rollout, scheduled sampling, or RL fine-tuning produces a
+  substantial paired improvement over online teacher-forcing SFT;
+- whether a MaskedMimic student changes under matched, zeroed, and shuffled scene
+  inputs on the same clips and checkpoint; and
+- whether an improvement is consistent across action types, recordings, and
+  multiple random seeds rather than caused by one interaction sequence.
+
+It is not sufficient to establish open-world ego-motion generalization,
+object-action understanding, outdoor or sports coverage, cross-dataset transfer,
+or a reliable improvement of only a few percentage points. The effective
+statistical units are the source recordings, not 800 independent clips, because
+clips from one recording share people, scenes, trajectories, and sometimes 50%
+of their frames. Validation and test each contain 75 clips; even before accounting
+for recording correlation, a success rate near 50% has a rough 95% binomial
+uncertainty of about plus or minus 11 percentage points.
+
+Primary comparisons must therefore use paired per-clip results, aggregate or
+bootstrap by recording, report at least three training seeds, and include
+continuous tracking errors and failure frames alongside binary success. Small
+gains should trigger a larger or external evaluation rather than a positive
+method claim.
 
 ## Reproduction
 
