@@ -8,6 +8,11 @@ EXTRACT_ROOT="$INSTALL_ROOT/root"
 ICD_PATH="$INSTALL_ROOT/dzn_icd.json"
 DRIVER_DIR="$EXTRACT_ROOT/usr/lib/x86_64-linux-gnu"
 
+# Native Linux training nodes do not need the WSLg Mesa compatibility layer.
+if ! grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null; then
+    exec "$@"
+fi
+
 if [[ ! -f "$ICD_PATH" ]]; then
     echo "WSL Vulkan compatibility layer is missing." >&2
     echo "Run: bash scripts/setup_wsl_isaacsim_vulkan.sh" >&2

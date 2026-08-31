@@ -105,6 +105,31 @@ Both model lines must consume the same manifest version. A result report must
 include the manifest SHA-256, source counts, action-type distribution, and
 teacher full-clip tracking coverage.
 
+## Training on another machine
+
+Clone the `ego` branch with Git LFS enabled, apply
+`patches/isaaclab12_protomotions_compat.patch` to the pinned IsaacLab checkout,
+and transfer either the raw EgoBody/text roots or the generated dataset packs.
+Generated motion packs and scene assets are ignored by Git and are not recovered
+by cloning this repository alone.
+
+For the recommended diverse core:
+
+```bash
+export EGOBODY_ROOT=/data/EgoBody
+export EGOBODY_BODY_TEXT_ROOT=/data/texts/body_texts/EgoBody
+export EGOBODY_DATASET_ROOT="$PWD/data/motion_for_trackers/egobody_smpl_ego_v1/sft_diverse_800_192"
+scripts/prepare_egobody_1000x192.sh
+```
+
+Before a long run, launch one short headless smoke test and monitor both VRAM and
+host RAM. The GPC baseline uses online expert-state/token collection. The
+MaskedMimic baseline should first evaluate or train a `body_only` teacher and
+verify full 192-frame tracking before scene-aware student distillation.
+
+Native Linux nodes execute IsaacLab directly. `scripts/run_wsl_isaaclab.sh`
+injects the local Mesa/Vulkan compatibility layer only when it detects WSL.
+
 ## Adding another dataset
 
 Before adding EgoExo4D or another source:
