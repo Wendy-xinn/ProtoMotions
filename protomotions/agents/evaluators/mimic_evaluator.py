@@ -186,8 +186,13 @@ class MimicEvaluator(BaseEvaluator):
         obs_td = self.agent.obs_dict_to_tensordict(obs)
 
         prev_actions = None
+        active = torch.ones(env_ids.numel(), dtype=torch.bool, device=self.device)
 
         for step_idx in range(max_steps):
+            active &= self._episode_ctx.frame_limits > step_idx
+            if not active.any():
+                break
+
             actions = self._policy_action(obs_td)
 
             # Apply EMA smoothing (deployment simulation)
@@ -202,8 +207,29 @@ class MimicEvaluator(BaseEvaluator):
             obs = self.agent.add_agent_info_to_obs(obs)
             obs_td = self.agent.obs_dict_to_tensordict(obs)
 
-            self._check_eval_components(env_ids, step_idx)
-            self._on_episode_step(env_ids, extras, actions)
+            active_env_ids = env_ids[active]
+            active_motion_ids = self._episode_ctx.motion_ids[active]
+            self._check_evaluation_failures(active_env_ids, active_motion_ids)
+            self._record_trajectory_step(
+                self._metrics,
+                extras,
+                active_env_ids,
+                active_motion_ids,
+                actions,
+            )
+
+            failed = (
+                self._motion_failed[active_motion_ids]
+                if self._motion_failed is not None
+                else torch.zeros_like(active_motion_ids, dtype=torch.bool)
+            )
+            terminated_active = terminated[active_env_ids].bool()
+            deactivate = failed | terminated_active
+            if deactivate.any():
+                failed_env_ids = active_env_ids[deactivate]
+                active_indices = torch.nonzero(active, as_tuple=False).flatten()
+                active[active_indices[deactivate]] = False
+                self.env.simulator.park_envs(failed_env_ids)
 
     def run_evaluation(self) -> None:
         """Run evaluation across multiple motions."""

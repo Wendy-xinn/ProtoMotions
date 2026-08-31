@@ -421,6 +421,28 @@ def test_mimic_evaluate_episode_applies_action_ema_and_records_actions(tmp_path)
     assert torch.equal(evaluator._metrics["actions"].data[0, 1], torch.full((2,), 1.5))
 
 
+def test_mimic_evaluate_episode_parks_failed_envs_and_stops_batch(tmp_path):
+    evaluator = _evaluator(tmp_path)
+    evaluator._episode_ctx = MimicEpisodeContext(
+        motion_ids=torch.tensor([0, 1]),
+        frame_limits=torch.tensor([10, 10]),
+    )
+    evaluator._metrics = {"actions": _metric(num_motions=2, features=2)}
+    evaluator._motion_failed = torch.zeros(3, dtype=torch.bool)
+
+    def fail_active(active_env_ids, active_motion_ids):
+        evaluator._motion_failed[active_motion_ids] = True
+
+    evaluator._check_evaluation_failures = fail_active
+    parked = []
+    evaluator.env.simulator.park_envs = lambda env_ids: parked.append(env_ids.clone())
+
+    evaluator.evaluate_episode(torch.tensor([0, 1]), max_steps=10)
+
+    assert len(evaluator.env.step_actions) == 1
+    assert torch.equal(parked[-1], torch.tensor([0, 1]))
+
+
 def test_mimic_process_eval_results_updates_weights_and_additional_metrics(tmp_path):
     evaluator = _evaluator(tmp_path)
     evaluator._motion_failed = torch.tensor([False, True, False])
