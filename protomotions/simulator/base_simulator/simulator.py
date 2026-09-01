@@ -771,14 +771,14 @@ class Simulator(RecordingMixin, ABC):
         env_ids: torch.Tensor,
         hide_z: float = -50.0,
     ) -> None:
-        """Move robot and scene objects for ``env_ids`` far below the terrain.
+        """Move robots for ``env_ids`` far below the terrain.
 
         Used during evaluation to disable physics for envs that are not being
         evaluated, eliminating their contribution to the PhysX broadphase pair
-        budget. Parked bodies sit well below any terrain/object AABB so no
-        broadphase pairs are generated, no narrow-phase contacts are computed,
-        and no found/lost pair churn occurs. Velocities are zeroed so the
-        parked bodies stay put.
+        budget. Scene objects deliberately remain at their original poses.
+        Moving a room mesh only slightly below a parked robot can leave the
+        robot embedded inside that mesh, while repeatedly teleporting large
+        static meshes creates unnecessary PhysX broadphase churn.
 
         Pre-eval state is restored later via ``BaseEnv.restore_state(snapshot)``,
         which calls ``reset_envs`` over all envs with the saved snapshot.
@@ -826,25 +826,7 @@ class Simulator(RecordingMixin, ABC):
             state_conversion=StateConversion.COMMON,
         )
 
-        park_object_state = None
-        if self.scene_lib.num_objects_per_scene > 0:
-            current_obj = self.get_object_root_state(env_ids)
-            obj_root_pos = current_obj.root_pos.clone()
-            obj_root_pos[..., 2] = hide_z - 1.0
-            obj_root_rot = current_obj.root_rot.clone()
-            m = self.scene_lib.num_objects_per_scene
-            zero_obj_vel = torch.zeros(
-                (n, m, 3), device=device, dtype=torch.float32
-            )
-            park_object_state = ObjectState(
-                root_pos=obj_root_pos,
-                root_rot=obj_root_rot,
-                root_vel=zero_obj_vel,
-                root_ang_vel=zero_obj_vel.clone(),
-                state_conversion=StateConversion.COMMON,
-            )
-
-        self.reset_envs(park_state, park_object_state, env_ids)
+        self.reset_envs(park_state, None, env_ids)
 
     @abstractmethod
     def _set_simulator_env_state(
