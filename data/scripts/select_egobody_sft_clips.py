@@ -40,7 +40,7 @@ for _name, _value in {
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--egobody-root", type=Path, default=Path("/home/wenxin/projects/egobody")
+        "--egobody-root", type=Path, default=Path("/public/home/wenxin/egobody")
     )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--frames", type=int, default=192)

@@ -65,7 +65,7 @@ def additional_experiment_arguments(parser: argparse.ArgumentParser):
         "--teacher-condition",
         choices=("body_only", "body_scene"),
         default="body_scene",
-        help="Controlled full-body teacher ablation with or without full scene input.",
+        help="Full-body reference-tracking teacher; ablate only whether scene input is exposed.",
     )
 
 

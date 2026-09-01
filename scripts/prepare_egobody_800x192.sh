@@ -6,7 +6,7 @@ REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-$REPO_ROOT/IsaacLab/.venv/bin/python}"
 EGOBODY_ROOT="${EGOBODY_ROOT:-/public/home/wenxin/egobody}"
 BODY_TEXT_ROOT="${EGOBODY_BODY_TEXT_ROOT:-}"
-DATASET_ROOT="${EGOBODY_DATASET_ROOT:-$REPO_ROOT/data/motion_for_trackers/egobody_smpl_ego_v1/sft_1000_192}"
+DATASET_ROOT="${EGOBODY_DATASET_ROOT:-$REPO_ROOT/data/motion_for_trackers/egobody_smpl_ego_v1/sft_diverse_800_192}"
 MANIFEST="$DATASET_ROOT/manifest.json"
 PREPARED_MANIFEST="$DATASET_ROOT/prepared_manifest.json"
 
@@ -40,5 +40,5 @@ if [[ ! -f "$DATASET_ROOT/online_packs_smpl_v1/manifest.json" ]]; then
         --camera-filename ego_camera.pt
 fi
 
-echo "Prepared shared EgoBody dataset: $DATASET_ROOT"
+echo "Prepared shared EgoBody diverse-800 dataset: $DATASET_ROOT"
 echo "Use EGOBODY_DATASET_ROOT=$DATASET_ROOT for both training baselines."

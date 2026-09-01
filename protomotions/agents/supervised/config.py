@@ -55,6 +55,20 @@ class SupervisedAgentConfig(BaseAgentConfig):
             "help": "Policy used for collecting rollout actions."
         },
     )
+    deployable_rollout_probability_init: float = field(
+        default=0.0,
+        metadata={
+            "help": "Initial probability of executing the deployable action when a privileged action is available."
+        },
+    )
+    deployable_rollout_probability_end: float = field(
+        default=0.0,
+        metadata={
+            "help": "Final probability of executing the deployable action when a privileged action is available."
+        },
+    )
+    deployable_rollout_schedule_start_epoch: int = 0
+    deployable_rollout_schedule_end_epoch: int = 0
     loss: SupervisionLossConfig = field(
         default_factory=SupervisionLossConfig,
         metadata={"help": "Supervised loss over model outputs and labels."},

@@ -321,9 +321,52 @@ class SupervisedAgent(BaseAgent):
         if self.config.rollout_actor == RolloutActor.EXPERT:
             action = output_td["action"]
         elif "privileged_action" in output_td:
-            action = output_td[
-                "privileged_action"
-            ]  # During training, we use the privileged action
+            start = getattr(
+                self.config, "deployable_rollout_schedule_start_epoch", 0
+            )
+            end = getattr(
+                self.config, "deployable_rollout_schedule_end_epoch", 0
+            )
+            if end <= start:
+                progress = float(getattr(self, "current_epoch", 0) >= end)
+            else:
+                progress = min(
+                    max(
+                        (getattr(self, "current_epoch", 0) - start) / (end - start),
+                        0.0,
+                    ),
+                    1.0,
+                )
+            probability = (
+                getattr(self.config, "deployable_rollout_probability_init", 0.0)
+                + progress
+                * (
+                    getattr(
+                        self.config, "deployable_rollout_probability_end", 0.0
+                    )
+                    - getattr(
+                        self.config, "deployable_rollout_probability_init", 0.0
+                    )
+                )
+            )
+            if probability <= 0.0:
+                action = output_td["privileged_action"]
+            elif probability >= 1.0:
+                action = output_td["action"]
+            else:
+                use_deployable = torch.rand(
+                    output_td.batch_size[0], 1, device=output_td.device
+                ) < probability
+                action = torch.where(
+                    use_deployable,
+                    output_td["action"],
+                    output_td["privileged_action"],
+                )
+            output_td["deployable_rollout_probability"] = torch.full(
+                (output_td.batch_size[0], 1),
+                probability,
+                device=output_td.device,
+            )
         else:
             action = output_td["action"]  # During evaluation, we use the action
 

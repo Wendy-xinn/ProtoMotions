@@ -44,11 +44,14 @@ def additional_experiment_arguments(parser: argparse.ArgumentParser):
         default=False,
         help=(
             "Distill scene latent/distance/contact outputs from a scene-aware "
-            "teacher. The default body-only baseline distills actions and uses "
+            "teacher. The default scene-free full-body tracker distills actions and uses "
             "ground-truth interaction auxiliaries for the student scene encoder."
         ),
     )
     parser.add_argument("--interaction-latent-loss-weight", type=float, default=0.1)
+    parser.add_argument("--deployable-action-loss-weight", type=float, default=0.25)
+    parser.add_argument("--deployable-rollout-start-epoch", type=int, default=500)
+    parser.add_argument("--deployable-rollout-end-epoch", type=int, default=3000)
     parser.add_argument("--interaction-distance-loss-weight", type=float, default=0.25)
     parser.add_argument("--interaction-contact-loss-weight", type=float, default=0.5)
     parser.add_argument(
@@ -170,6 +173,20 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
 
 def agent_config(robot_config: RobotConfig, env_config: EnvConfig, args):
     config = base.agent_config(robot_config, env_config, args)
+    config.deployable_rollout_probability_init = 0.0
+    config.deployable_rollout_probability_end = 1.0
+    config.deployable_rollout_schedule_start_epoch = (
+        args.deployable_rollout_start_epoch
+    )
+    config.deployable_rollout_schedule_end_epoch = args.deployable_rollout_end_epoch
+    config.auxiliary_losses = [
+        SupervisionLossConfig(
+            prediction_key="action",
+            target_key="expert_actions",
+            weight=args.deployable_action_loss_weight,
+            log_prefix="masked_mimic/deployable_action",
+        )
+    ]
     prior = config.model.prior
     scene_keys = [
         "ego_visible_scene_pointcloud",
@@ -249,7 +266,8 @@ def agent_config(robot_config: RobotConfig, env_config: EnvConfig, args):
             "future_scene_distance_pred": "expert_scene_distance_pred",
             "future_scene_contact_logits": "expert_scene_contact_logits",
         }
-        config.auxiliary_losses = [
+        config.auxiliary_losses.extend(
+            [
             SupervisionLossConfig(
                 prediction_key="student_scene_interaction_latent",
                 target_key="expert_scene_interaction_latent",
@@ -268,7 +286,8 @@ def agent_config(robot_config: RobotConfig, env_config: EnvConfig, args):
                 weight=args.interaction_contact_loss_weight,
                 log_prefix="scene_distill/contact",
             ),
-        ]
+            ]
+        )
     return config
 
 

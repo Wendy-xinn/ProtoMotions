@@ -495,6 +495,25 @@ def test_collect_rollout_step_prefers_privileged_action_for_student_training():
     )
 
 
+def test_collect_rollout_step_can_execute_deployable_action_after_schedule():
+    agent = _agent(RolloutActor.STUDENT)
+    agent.model = _PrivilegedStudentModel()
+    agent.model_output_keys = agent.model.out_keys
+    agent.experience_buffer = _ExperienceBufferRecorder()
+    agent.current_epoch = 10
+    agent.config.deployable_rollout_probability_init = 0.0
+    agent.config.deployable_rollout_probability_end = 1.0
+    agent.config.deployable_rollout_schedule_start_epoch = 0
+    agent.config.deployable_rollout_schedule_end_epoch = 10
+
+    output = SupervisedAgent.collect_rollout_step(agent, _obs_td(), step=9)
+
+    assert torch.equal(output["action"], torch.tensor([[2.0], [3.0]]))
+    assert torch.equal(
+        output["deployable_rollout_probability"], torch.ones(2, 1)
+    )
+
+
 def test_collect_rollout_step_stores_external_expert_actions_when_not_target_key():
     agent = _agent(RolloutActor.STUDENT, expert_model=_ExternalExpert())
     agent.model_output_keys = ["action", "target_tokens"]

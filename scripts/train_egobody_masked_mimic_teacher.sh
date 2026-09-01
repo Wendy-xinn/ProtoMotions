@@ -85,7 +85,7 @@ fi
 
 result_dir="$REPO_ROOT/results/$MM_TEACHER_EXPERIMENT_NAME"
 mkdir -p "$result_dir"
-echo "SMPL stage-1 teacher: mode=$MM_TEACHER_MODE split=$MM_SPLIT envs=$num_envs"
+echo "SMPL full-body reference-tracking teacher: scene_condition=$MM_TEACHER_MODE split=$MM_SPLIT envs=$num_envs"
 echo "iterations=$MM_TEACHER_ITERATIONS batch=$MM_TEACHER_BATCH_SIZE"
 
 cd "$REPO_ROOT"

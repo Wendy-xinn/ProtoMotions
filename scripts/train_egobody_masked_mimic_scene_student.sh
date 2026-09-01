@@ -13,12 +13,15 @@ MM_STUDENT_BATCH_SIZE="${MM_STUDENT_BATCH_SIZE:-100}"
 MM_STUDENT_EXPERIMENT_NAME="${MM_STUDENT_EXPERIMENT_NAME:-egobody_smpl_masked_mimic_scene_student_800_v1}"
 MM_TEACHER_CHECKPOINT="${MM_TEACHER_CHECKPOINT:-${MM_SCENE_TEACHER_CHECKPOINT:-$REPO_ROOT/data/pretrained_models/motion_tracker/smpl/last.ckpt}}"
 MM_DISTILL_EXPERT_INTERACTIONS="${MM_DISTILL_EXPERT_INTERACTIONS:-0}"
+MM_DEPLOYABLE_ACTION_LOSS_WEIGHT="${MM_DEPLOYABLE_ACTION_LOSS_WEIGHT:-0.25}"
+MM_DEPLOYABLE_ROLLOUT_START_EPOCH="${MM_DEPLOYABLE_ROLLOUT_START_EPOCH:-500}"
+MM_DEPLOYABLE_ROLLOUT_END_EPOCH="${MM_DEPLOYABLE_ROLLOUT_END_EPOCH:-3000}"
 
 export MPLCONFIGDIR="${MPLCONFIGDIR:-/tmp/protomotions-matplotlib-${USER:-user}}"
 mkdir -p "$MPLCONFIGDIR"
 
 if [[ -z "$MM_TEACHER_CHECKPOINT" || ! -f "$MM_TEACHER_CHECKPOINT" ]]; then
-    echo "Set MM_TEACHER_CHECKPOINT to a body-only/full-information teacher checkpoint." >&2
+    echo "Set MM_TEACHER_CHECKPOINT to a full-body reference-tracking teacher checkpoint." >&2
     exit 2
 fi
 
@@ -55,6 +58,7 @@ mkdir -p "$result_dir"
 echo "SMPL scene-aware MaskedMimic student: split=$MM_SPLIT envs=$num_envs"
 echo "teacher=$MM_TEACHER_CHECKPOINT"
 echo "distill_expert_interactions=$MM_DISTILL_EXPERT_INTERACTIONS"
+echo "deployable_action_loss=$MM_DEPLOYABLE_ACTION_LOSS_WEIGHT rollout_schedule=$MM_DEPLOYABLE_ROLLOUT_START_EPOCH..$MM_DEPLOYABLE_ROLLOUT_END_EPOCH"
 
 DISTILL_INTERACTIONS_FLAG=()
 if [[ "$MM_DISTILL_EXPERT_INTERACTIONS" == "1" ]]; then
@@ -74,6 +78,9 @@ exec "$REPO_ROOT/scripts/run_with_memory_guard.sh" \
     --ego-camera-file "${inputs[2]}" \
     --scene-asset-root "${inputs[3]}" \
     --expert-model-path "$MM_TEACHER_CHECKPOINT" \
+    --deployable-action-loss-weight "$MM_DEPLOYABLE_ACTION_LOSS_WEIGHT" \
+    --deployable-rollout-start-epoch "$MM_DEPLOYABLE_ROLLOUT_START_EPOCH" \
+    --deployable-rollout-end-epoch "$MM_DEPLOYABLE_ROLLOUT_END_EPOCH" \
     "${DISTILL_INTERACTIONS_FLAG[@]}" \
     --experiment-path examples/experiments/masked_mimic/egobody_scene.py \
     --experiment-name "$MM_STUDENT_EXPERIMENT_NAME" \
