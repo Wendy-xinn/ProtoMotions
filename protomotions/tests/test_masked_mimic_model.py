@@ -148,3 +148,31 @@ def test_masked_mimic_model_loss_without_tensordict_returns_grad_connected_zero(
     assert torch.equal(logs["model/kld_loss"], torch.zeros(()))
     loss.backward()
     assert torch.equal(zero_loss.grad, torch.zeros_like(zero_loss))
+
+
+def test_masked_mimic_interaction_loss_weights_positive_contacts():
+    model = _masked_mimic_model_with_kld_schedule(None)
+    model.config.interaction_target_key = "future_scene_interactions"
+    model.config.interaction_num_targets = 1
+    model.config.interaction_distance_loss_weight = 0.0
+    model.config.interaction_contact_loss_weight = 1.0
+    model.config.interaction_contact_focal_gamma = 2.0
+    model.config.interaction_contact_positive_weight = 10.0
+    tensordict = TensorDict(
+        {
+            "future_scene_interactions": torch.tensor([[0.0, 1.0]]),
+            "student_scene_distance_pred": torch.tensor([[0.0]]),
+            "student_scene_contact_logits": torch.tensor([[0.0]]),
+        },
+        batch_size=1,
+    )
+
+    loss, metrics = model._interaction_auxiliary_loss(
+        tensordict,
+        zero_loss=tensordict["student_scene_contact_logits"].sum() * 0.0,
+    )
+
+    expected = 10.0 * 0.25 * torch.log(torch.tensor(2.0))
+    torch.testing.assert_close(loss, expected)
+    assert metrics["scene_student/contact_positive_rate"] == 1.0
+    assert metrics["scene_student/contact_recall"] == 0.0

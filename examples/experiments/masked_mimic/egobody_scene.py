@@ -32,9 +32,28 @@ def additional_experiment_arguments(parser: argparse.ArgumentParser):
     parser.add_argument("--scene-pointcloud-candidates", type=int, default=2048)
     parser.add_argument("--scene-pointcloud-seed", type=int, default=0)
     parser.add_argument("--scene-contact-threshold-m", type=float, default=0.05)
+    parser.add_argument(
+        "--scene-history-token",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Add the GPC-style summary token for accumulated causal scene memory.",
+    )
+    parser.add_argument(
+        "--distill-expert-interactions",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Distill scene latent/distance/contact outputs from a scene-aware "
+            "teacher. The default body-only baseline distills actions and uses "
+            "ground-truth interaction auxiliaries for the student scene encoder."
+        ),
+    )
     parser.add_argument("--interaction-latent-loss-weight", type=float, default=0.1)
     parser.add_argument("--interaction-distance-loss-weight", type=float, default=0.25)
     parser.add_argument("--interaction-contact-loss-weight", type=float, default=0.5)
+    parser.add_argument(
+        "--interaction-contact-positive-weight", type=float, default=10.0
+    )
 
 
 def terrain_config(args: argparse.Namespace):
@@ -168,6 +187,7 @@ def agent_config(robot_config: RobotConfig, env_config: EnvConfig, args):
         point_key="ego_visible_scene_pointcloud",
         point_feature_dim=10,
         condition_mode="full",
+        use_scene_history_token=getattr(args, "scene_history_token", True),
     )
     num_targets = len(INTERACTION_FUTURE_STEPS) * len(
         robot_config.kinematic_info.body_names
@@ -216,32 +236,39 @@ def agent_config(robot_config: RobotConfig, env_config: EnvConfig, args):
         args.interaction_distance_loss_weight
     )
     config.model.interaction_contact_loss_weight = args.interaction_contact_loss_weight
+    config.model.interaction_contact_positive_weight = (
+        args.interaction_contact_positive_weight
+    )
 
-    config.expert_output_map = {
-        "scene_interaction_latent": "expert_scene_interaction_latent",
-        "future_scene_distance_pred": "expert_scene_distance_pred",
-        "future_scene_contact_logits": "expert_scene_contact_logits",
-    }
-    config.auxiliary_losses = [
-        SupervisionLossConfig(
-            prediction_key="student_scene_interaction_latent",
-            target_key="expert_scene_interaction_latent",
-            weight=args.interaction_latent_loss_weight,
-            log_prefix="scene_distill/latent",
-        ),
-        SupervisionLossConfig(
-            prediction_key="student_scene_distance_pred",
-            target_key="expert_scene_distance_pred",
-            weight=args.interaction_distance_loss_weight,
-            log_prefix="scene_distill/distance",
-        ),
-        SupervisionLossConfig(
-            prediction_key="student_scene_contact_logits",
-            target_key="expert_scene_contact_logits",
-            weight=args.interaction_contact_loss_weight,
-            log_prefix="scene_distill/contact",
-        ),
+    config.evaluator.policy_observation_intervention_keys = [
+        "ego_visible_scene_pointcloud"
     ]
+    if getattr(args, "distill_expert_interactions", False):
+        config.expert_output_map = {
+            "scene_interaction_latent": "expert_scene_interaction_latent",
+            "future_scene_distance_pred": "expert_scene_distance_pred",
+            "future_scene_contact_logits": "expert_scene_contact_logits",
+        }
+        config.auxiliary_losses = [
+            SupervisionLossConfig(
+                prediction_key="student_scene_interaction_latent",
+                target_key="expert_scene_interaction_latent",
+                weight=args.interaction_latent_loss_weight,
+                log_prefix="scene_distill/latent",
+            ),
+            SupervisionLossConfig(
+                prediction_key="student_scene_distance_pred",
+                target_key="expert_scene_distance_pred",
+                weight=args.interaction_distance_loss_weight,
+                log_prefix="scene_distill/distance",
+            ),
+            SupervisionLossConfig(
+                prediction_key="student_scene_contact_logits",
+                target_key="expert_scene_contact_logits",
+                weight=args.interaction_contact_loss_weight,
+                log_prefix="scene_distill/contact",
+            ),
+        ]
     return config
 
 

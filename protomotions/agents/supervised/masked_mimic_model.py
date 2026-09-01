@@ -227,19 +227,45 @@ class MaskedMimicModel(BaseModel):
         probability_of_target = torch.where(
             contact_target > 0.5, probability, 1.0 - probability
         )
+        contact_weight = torch.where(
+            contact_target > 0.5,
+            bce.new_tensor(
+                getattr(config, "interaction_contact_positive_weight", 1.0)
+            ),
+            bce.new_tensor(1.0),
+        )
         contact_loss = (
             (1.0 - probability_of_target).pow(
                 getattr(config, "interaction_contact_focal_gamma", 2.0)
             )
             * bce
+            * contact_weight
         ).mean()
         weighted = (
             getattr(config, "interaction_distance_loss_weight", 0.0) * distance_loss
             + getattr(config, "interaction_contact_loss_weight", 0.0) * contact_loss
         )
+        with torch.no_grad():
+            contact_pred = contact_logits > 0.0
+            contact_true = contact_target > 0.5
+            true_positive = (contact_pred & contact_true).float().sum()
+            predicted_positive = contact_pred.float().sum()
+            target_positive = contact_true.float().sum()
+            contact_precision = true_positive / predicted_positive.clamp_min(1.0)
+            contact_recall = true_positive / target_positive.clamp_min(1.0)
+            contact_f1 = (
+                2.0
+                * contact_precision
+                * contact_recall
+                / (contact_precision + contact_recall).clamp_min(1.0e-8)
+            )
         return weighted, {
             "scene_student/distance_loss": distance_loss.detach(),
             "scene_student/contact_focal_loss": contact_loss.detach(),
+            "scene_student/contact_precision": contact_precision,
+            "scene_student/contact_recall": contact_recall,
+            "scene_student/contact_f1": contact_f1,
+            "scene_student/contact_positive_rate": contact_true.float().mean(),
             "scene_student/interaction_loss": weighted.detach(),
         }
 

@@ -4,20 +4,21 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-$REPO_ROOT/IsaacLab/.venv/bin/python}"
-DATASET_ROOT="${EGOBODY_DATASET_ROOT:-$REPO_ROOT/data/motion_for_trackers/egobody_smpl_ego_v1/offline_sft_50}"
+DATASET_ROOT="${EGOBODY_DATASET_ROOT:-$REPO_ROOT/data/motion_for_trackers/egobody_smpl_ego_v1/sft_diverse_800_192}"
 PREPARED_MANIFEST="${EGOBODY_PREPARED_MANIFEST:-$DATASET_ROOT/prepared_manifest.json}"
 PACK_ROOT="${EGOBODY_SMPL_PACK_ROOT:-$DATASET_ROOT/online_packs_smpl_v1}"
 MM_SPLIT="${MM_SPLIT:-train}"
 MM_STUDENT_ITERATIONS="${MM_STUDENT_ITERATIONS:-5000}"
-MM_STUDENT_BATCH_SIZE="${MM_STUDENT_BATCH_SIZE:-128}"
-MM_STUDENT_EXPERIMENT_NAME="${MM_STUDENT_EXPERIMENT_NAME:-egobody_smpl_masked_mimic_scene_student_40_v1}"
-MM_SCENE_TEACHER_CHECKPOINT="${MM_SCENE_TEACHER_CHECKPOINT:-}"
+MM_STUDENT_BATCH_SIZE="${MM_STUDENT_BATCH_SIZE:-100}"
+MM_STUDENT_EXPERIMENT_NAME="${MM_STUDENT_EXPERIMENT_NAME:-egobody_smpl_masked_mimic_scene_student_800_v1}"
+MM_TEACHER_CHECKPOINT="${MM_TEACHER_CHECKPOINT:-${MM_SCENE_TEACHER_CHECKPOINT:-$REPO_ROOT/data/pretrained_models/motion_tracker/smpl/last.ckpt}}"
+MM_DISTILL_EXPERT_INTERACTIONS="${MM_DISTILL_EXPERT_INTERACTIONS:-0}"
 
 export MPLCONFIGDIR="${MPLCONFIGDIR:-/tmp/protomotions-matplotlib-${USER:-user}}"
 mkdir -p "$MPLCONFIGDIR"
 
-if [[ -z "$MM_SCENE_TEACHER_CHECKPOINT" || ! -f "$MM_SCENE_TEACHER_CHECKPOINT" ]]; then
-    echo "Set MM_SCENE_TEACHER_CHECKPOINT to a trained body_scene teacher checkpoint." >&2
+if [[ -z "$MM_TEACHER_CHECKPOINT" || ! -f "$MM_TEACHER_CHECKPOINT" ]]; then
+    echo "Set MM_TEACHER_CHECKPOINT to a body-only/full-information teacher checkpoint." >&2
     exit 2
 fi
 
@@ -52,7 +53,13 @@ fi
 result_dir="$REPO_ROOT/results/$MM_STUDENT_EXPERIMENT_NAME"
 mkdir -p "$result_dir"
 echo "SMPL scene-aware MaskedMimic student: split=$MM_SPLIT envs=$num_envs"
-echo "teacher=$MM_SCENE_TEACHER_CHECKPOINT"
+echo "teacher=$MM_TEACHER_CHECKPOINT"
+echo "distill_expert_interactions=$MM_DISTILL_EXPERT_INTERACTIONS"
+
+DISTILL_INTERACTIONS_FLAG=()
+if [[ "$MM_DISTILL_EXPERT_INTERACTIONS" == "1" ]]; then
+    DISTILL_INTERACTIONS_FLAG+=(--distill-expert-interactions)
+fi
 
 cd "$REPO_ROOT"
 exec "$REPO_ROOT/scripts/run_with_memory_guard.sh" \
@@ -66,7 +73,8 @@ exec "$REPO_ROOT/scripts/run_with_memory_guard.sh" \
     --scenes-file "${inputs[1]}" \
     --ego-camera-file "${inputs[2]}" \
     --scene-asset-root "${inputs[3]}" \
-    --expert-model-path "$MM_SCENE_TEACHER_CHECKPOINT" \
+    --expert-model-path "$MM_TEACHER_CHECKPOINT" \
+    "${DISTILL_INTERACTIONS_FLAG[@]}" \
     --experiment-path examples/experiments/masked_mimic/egobody_scene.py \
     --experiment-name "$MM_STUDENT_EXPERIMENT_NAME" \
     --training-max-iterations "$MM_STUDENT_ITERATIONS" \

@@ -106,6 +106,8 @@ class MaskedMimicModelConfig(BaseModelConfig):
     interaction_distance_loss_weight: float = 0.0
     interaction_contact_loss_weight: float = 0.0
     interaction_contact_focal_gamma: float = 2.0
+    interaction_contact_positive_weight: float = 1.0
+
 
 @dataclass
 class MaskedMimicSupervisedAgentConfig(SupervisedAgentConfig):

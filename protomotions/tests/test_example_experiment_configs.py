@@ -22,6 +22,7 @@ from examples.experiments.gpc import sft_target_prior_peft
 from examples.experiments.gpc import target_prior_peft
 from examples.experiments.gpc import task_target_prior_peft_amp
 from examples.experiments.mimic import fsq as mimic_fsq
+from examples.experiments.masked_mimic import egobody_scene
 from protomotions.agents.common.latent import LATENT_KEY, LATENT_LOGITS_KEY
 from protomotions.agents.supervised.config import RolloutActor
 
@@ -658,3 +659,23 @@ def test_gpc_peft_configs_define_task_feature_model_not_legacy_routing_fields(
     assert "max_coords_obs" not in actor_peft_model_cfg.in_keys
     assert "task_cond" in actor_peft_model_cfg.out_keys
     assert any("task_cond" in model.out_keys for model in actor_peft_model_cfg.models)
+
+
+def test_egobody_scene_student_defaults_to_body_only_action_distillation():
+    parser = argparse.ArgumentParser()
+    egobody_scene.additional_experiment_arguments(parser)
+
+    default_args = parser.parse_args(["--scene-asset-root", "/tmp/egobody"])
+    assert default_args.scene_history_token is True
+    assert default_args.distill_expert_interactions is False
+
+    interaction_args = parser.parse_args(
+        [
+            "--scene-asset-root",
+            "/tmp/egobody",
+            "--no-scene-history-token",
+            "--distill-expert-interactions",
+        ]
+    )
+    assert interaction_args.scene_history_token is False
+    assert interaction_args.distill_expert_interactions is True
