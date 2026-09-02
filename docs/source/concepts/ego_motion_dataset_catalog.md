@@ -33,8 +33,9 @@ Every selected clip must record:
   penetration checks, and teacher tracking coverage when available.
 
 Large meshes, motion packs, videos, checkpoints, and generated JSONL records are
-local or external artifacts. Selection code, schemas, aggregate reports, and
-reproduction commands belong in Git.
+local or external artifacts. The final `sft_diverse_800_192/manifest.json`,
+selection code, schemas, aggregate reports, and reproduction commands belong in
+Git.
 
 ## EgoBody versions
 
@@ -189,8 +190,9 @@ teacher full-clip tracking coverage.
 Clone the `ego` branch with Git LFS enabled, apply
 `patches/isaaclab12_protomotions_compat.patch` to the pinned IsaacLab checkout,
 and transfer either the raw EgoBody/text roots or the generated dataset packs.
-Generated motion packs and scene assets are ignored by Git and are not recovered
-by cloning this repository alone.
+The final diverse-core selection manifest is tracked by Git. Generated motion
+packs and scene assets remain ignored and are not recovered by cloning this
+repository alone.
 
 For the recommended diverse core:
 

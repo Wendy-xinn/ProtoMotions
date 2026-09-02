@@ -81,10 +81,11 @@ Regenerate the selection and both training packs with
 manifests with `scripts/select_egobody_training_sets.sh`. Set `EGOBODY_ROOT` and
 `EGOBODY_BODY_TEXT_ROOT` when using a different machine.
 
-Generated manifests, motion tensors, meshes, and scene maps are ignored by Git.
-Git stores the selector, exclusion list, preprocessing code, and this catalog;
-copy the generated artifacts separately or rebuild them from EgoBody after
-cloning the `ego` branch.
+The final `sft_diverse_800_192/manifest.json` is force-tracked despite the parent
+data directory being ignored, so its 800 recording IDs and frame ranges travel
+with the `ego` branch. Motion tensors, meshes, scene maps, dense-set manifests,
+and generated JSONL records remain ignored; copy those artifacts separately or
+rebuild them from EgoBody after cloning.
 
 ## Scope
 
