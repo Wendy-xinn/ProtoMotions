@@ -39,10 +39,10 @@ This note records the changes intentionally deferred after
   simulator states, and frozen-tracker target tokens online, then optimize with
   teacher forcing. Keep the fixed offline cache only as a deterministic
   memorization and regression probe.
-- Preserve the orientation-retargeted targets and Head feedback during the
-  online rollout. Oracle-token physical rollout already shows that this target
-  chain can complete the selected train clip; student failure should not be
-  attributed to retargeting without an online, matched-protocol comparison.
+- Preserve the orientation-retargeted targets and Head trajectory conditioning
+  during the online rollout. Direct Head action feedback remains disabled for
+  the matched SFT/RLFT baseline because it changes the next simulator state and
+  can destabilize the rest of the body.
 - Make mesh-surface point sampling reproducible between training and inference,
   or resample/augment it during training. The fixed cache currently memorizes
   one random scene point set: substituting a newly sampled point cloud changes
@@ -89,6 +89,26 @@ This note records the changes intentionally deferred after
 - Add scheduled sampling or short student-unrolled fine-tuning after SFT to
   reduce exposure-bias drift, followed by RLFT only after the SFT baseline is
   stable.
+
+## RLFT parameter contract
+
+RLFT initializes the student from the selected SFT checkpoint. The pretrained
+GPC base prior, FSQ action decoder, and a complete snapshot of the SFT policy
+are frozen. The snapshot includes both the scene/Head condition encoder and the
+DoRA-conditioned token Transformer, so it independently maps raw observations
+to reference token probabilities. The trainable actor parameters are only the
+student scene/Head encoder and student DoRA adapter; the critic is trained
+separately.
+
+PPO samples student tokens with full vocabulary support. The frozen SFT policy
+is evaluated during optimization for the KL penalty, rather than used as a hard
+top-p mask during rollout. At RLFT initialization the student and reference
+token distributions must match and their KL must be approximately zero.
+Training checkpoints persist the frozen reference for exact resume; inference
+checkpoints omit it and contain only the student adapter. A new RLFT run must
+warm-start from the SFT checkpoint, while an RLFT resume must use a complete
+RLFT training checkpoint and must never reconstruct the reference from the
+already-updated student.
 
 ## Validation and throughput
 

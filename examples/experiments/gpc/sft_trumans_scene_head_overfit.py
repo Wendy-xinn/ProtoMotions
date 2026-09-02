@@ -73,6 +73,82 @@ def additional_experiment_arguments(parser: argparse.ArgumentParser):
         default=0.0,
         help="Weight of the 40-way unpacked FSQ scalar auxiliary objective.",
     )
+    parser.add_argument("--sequence-action-loss-weight", type=float, default=0.0)
+    parser.add_argument("--sequence-velocity-loss-weight", type=float, default=0.0)
+    parser.add_argument(
+        "--sequence-acceleration-loss-weight", type=float, default=0.0
+    )
+    parser.add_argument("--sequence-action-loss-beta", type=float, default=0.05)
+    parser.add_argument(
+        "--autoregressive-student-prefix-rate", type=float, default=0.0
+    )
+    parser.add_argument(
+        "--token-perturb-rate",
+        type=float,
+        default=0.0,
+        help="Fraction of teacher-forced prior tokens to perturb during SFT.",
+    )
+    parser.add_argument(
+        "--sft-actor-lr",
+        type=float,
+        default=3e-4,
+        help="Learning rate for the supervised PEFT actor optimizer.",
+    )
+    parser.add_argument(
+        "--sft-label-smoothing",
+        type=float,
+        default=0.01,
+        help="Label smoothing for packed-token cross-entropy.",
+    )
+    parser.add_argument(
+        "--sft-parameter-ema-decay",
+        type=float,
+        default=None,
+        help="Optional EMA decay for trainable SFT parameters.",
+    )
+    parser.add_argument(
+        "--token-perturb-mode",
+        choices=("replace", "neighbor", "mixed"),
+        default="neighbor",
+        help="How to perturb teacher-forced prior tokens.",
+    )
+    parser.add_argument(
+        "--sft-rollout-actor",
+        choices=("expert", "student", "mixed"),
+        default="expert",
+        help="Policy used to advance physics while collecting SFT labels.",
+    )
+    parser.add_argument(
+        "--dagger-beta-schedule",
+        type=float,
+        nargs="+",
+        default=(0.95, 0.90, 0.80, 0.70),
+    )
+    parser.add_argument(
+        "--dagger-success-thresholds",
+        type=float,
+        nargs="+",
+        default=(0.25, 0.50, 0.70),
+    )
+    parser.add_argument("--dagger-max-student-run", type=int, default=4)
+    parser.add_argument(
+        "--eval-action-ema-alpha",
+        type=float,
+        default=None,
+        help="Optional causal EMA applied to actions during physical evaluation.",
+    )
+    parser.add_argument(
+        "--fixed-motion-eval-batch-size",
+        type=int,
+        default=16,
+        help="Number of fixed motions evaluated concurrently.",
+    )
+    parser.add_argument(
+        "--sft-score-component",
+        choices=("gt_error", "gr_error", "max_joint_error"),
+        default="gt_error",
+        help="Physical metric used to select the best SFT checkpoint.",
+    )
     parser.add_argument(
         "--head-translation-only",
         action="store_true",
@@ -298,6 +374,7 @@ def agent_config(robot_config, env_config, args):
         DiscretePriorPEFTSFTAgentConfig,
         DiscretePriorPEFTSFTModelConfig,
     )
+    from protomotions.agents.supervised.config import RolloutActor
     # Ada-class and newer NVIDIA GPUs accelerate the frozen GPC prior's large
     # float32 matrix multiplications substantially with TF32. This keeps model
     # parameters, optimizer state, losses, and checkpoints in float32; only the
@@ -313,7 +390,7 @@ def agent_config(robot_config, env_config, args):
         condition_mode=args.condition_mode,
         use_scene_history_token=args.scene_history_token,
     )
-    return DiscretePriorPEFTSFTAgentConfig(
+    config = DiscretePriorPEFTSFTAgentConfig(
         pretrained_modules={"prior": PretrainedModelConfig(
             checkpoint_path=args.prior_checkpoint, module_path=""
         )},
@@ -323,28 +400,50 @@ def agent_config(robot_config, env_config, args):
                 peft=DiscretePriorPEFTConfig(
                     model=condition_model,
                     peft_type="dora", rank=16, alpha=32,
-                    temperature=1.0, top_p=0.9,
-                    sampling_mode="prior_constraint", prior_top_p=0.99,
+                    temperature=1.0, top_p=1.0,
+                    sampling_mode="nucleus", prior_top_p=1.0,
                     film_input_norm=True,
                 ),
             ),
-            actor_optimizer=OptimizerConfig(_target_="torch.optim.AdamW", lr=3e-4),
+            actor_optimizer=OptimizerConfig(
+                _target_="torch.optim.AdamW", lr=args.sft_actor_lr
+            ),
+            token_perturb_rate=args.token_perturb_rate,
+            token_perturb_mode=args.token_perturb_mode,
+            autoregressive_student_prefix_rate=(
+                args.autoregressive_student_prefix_rate
+            ),
             fsq_scalar_aux_weight=args.fsq_scalar_aux_weight,
+            sequence_action_loss_weight=args.sequence_action_loss_weight,
+            sequence_velocity_loss_weight=args.sequence_velocity_loss_weight,
+            sequence_acceleration_loss_weight=(
+                args.sequence_acceleration_loss_weight
+            ),
+            sequence_action_loss_beta=args.sequence_action_loss_beta,
         ),
         batch_size=args.batch_size,
         training_max_steps=args.training_max_steps,
         num_steps=args.rollout_horizon,
         num_mini_epochs=args.num_mini_epochs,
         gradient_clip_val=10.0,
+        rollout_actor=RolloutActor(args.sft_rollout_actor),
+        dagger_beta_schedule=list(args.dagger_beta_schedule),
+        dagger_success_thresholds=list(args.dagger_success_thresholds),
+        dagger_max_consecutive_student_steps=args.dagger_max_student_run,
         save_last_checkpoint_every=args.save_last_checkpoint_every,
         evaluator=MimicEvaluatorConfig(
             eval_metrics_every=args.eval_metrics_every,
             max_eval_steps=191,
+            fixed_motion_eval_batch_size=args.fixed_motion_eval_batch_size,
+            eval_action_ema_alpha=args.eval_action_ema_alpha,
+            deterministic_policy=True,
+            score_component=args.sft_score_component,
+            score_component_minimize=True,
             save_predicted_motion_lib_every=None,
             evaluation_components={
-                "gt_error": gt_error_factory(threshold=0.5),
-                "gr_error": gr_error_factory(),
-                "max_joint_error": max_joint_error_factory(),
+                "gt_error": gt_error_factory(threshold=0.35),
+                "gr_error": gr_error_factory(threshold=0.70),
+                "max_joint_error": max_joint_error_factory(threshold=0.75),
             },
         ),
         offline_cache_output=args.offline_cache_output,
@@ -353,6 +452,11 @@ def agent_config(robot_config, env_config, args):
         offline_dataset_split=args.offline_dataset_split,
         offline_num_epochs=args.offline_num_epochs,
     )
+    if not 0.0 <= args.sft_label_smoothing < 1.0:
+        raise ValueError("--sft-label-smoothing must be in [0, 1)")
+    config.loss.label_smoothing = args.sft_label_smoothing
+    config.parameter_ema_decay = args.sft_parameter_ema_decay
+    return config
 
 
 def configure_robot_and_simulator(robot_cfg, simulator_cfg: SimulatorConfig, args):

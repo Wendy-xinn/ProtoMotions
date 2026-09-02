@@ -78,6 +78,13 @@ def parse_args() -> argparse.Namespace:
         default=96,
         help="Minimum start-frame separation within a recording in scalable mode.",
     )
+    parser.add_argument(
+        "--exclude-window",
+        action="append",
+        default=[],
+        metavar="RECORDING:START",
+        help="Exclude a known-bad recording window. May be specified multiple times.",
+    )
     parser.add_argument("--seed", type=int, default=20260825)
     return parser.parse_args()
 
@@ -530,6 +537,15 @@ def balanced_top(
 def main() -> None:
     args = parse_args()
     root = args.egobody_root.resolve()
+    excluded_windows = set()
+    for value in args.exclude_window:
+        try:
+            recording, start_text = value.rsplit(":", 1)
+            excluded_windows.add((recording, int(start_text)))
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid --exclude-window {value!r}; expected RECORDING:START"
+            ) from exc
     infos = recording_info(root)
     members = split_members(root)
     rng = np.random.default_rng(args.seed)
@@ -560,6 +576,7 @@ def main() -> None:
                     item
                     for item in candidates
                     if item["motion_score"] >= args.minimum_motion_score
+                    and (item["recording"], item["start"]) not in excluded_windows
                 ]
                 if args.body_text_root is not None and candidates:
                     attach_text_features(
@@ -593,6 +610,11 @@ def main() -> None:
                     args.candidate_stride,
                     args.score_stride,
                 )
+                candidates = [
+                    item
+                    for item in candidates
+                    if (item["recording"], item["start"]) not in excluded_windows
+                ]
                 selected = nonoverlapping_top(candidates, clips_per_recording)
                 if len(selected) == clips_per_recording:
                     ranked.append(
@@ -624,6 +646,10 @@ def main() -> None:
             str(args.body_text_root.resolve()) if args.body_text_root is not None else None
         ),
         "minimum_motion_score": args.minimum_motion_score,
+        "excluded_windows": [
+            {"recording": recording, "start": start}
+            for recording, start in sorted(excluded_windows)
+        ],
         "split_clip_counts": (
             dict(zip(("train", "val", "test"), args.split_clip_counts))
             if args.split_clip_counts is not None

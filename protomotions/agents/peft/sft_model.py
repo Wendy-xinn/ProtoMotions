@@ -58,7 +58,11 @@ def factorized_fsq_cross_entropy(
             for axis in range(packed_rank, packed_rank + scalars_per_token)
             if axis != keep_axis
         )
-        scalar_log_probs = torch.logsumexp(log_joint, dim=reduce_axes)
+        scalar_log_probs = (
+            torch.logsumexp(log_joint, dim=reduce_axes)
+            if reduce_axes
+            else log_joint
+        )
         scalar_target = scalar_targets[..., scalar_index]
         scalar_losses.append(
             F.nll_loss(
@@ -70,6 +74,48 @@ def factorized_fsq_cross_entropy(
             (scalar_log_probs.argmax(dim=-1) == scalar_target).float().mean()
         )
     return torch.stack(scalar_losses).mean(), torch.stack(scalar_correct).mean()
+
+
+def factorized_fsq_expected_indices(
+    logits: torch.Tensor,
+    *,
+    num_levels: int,
+    scalars_per_token: int,
+    straight_through_hard: bool = False,
+) -> torch.Tensor:
+    """Return differentiable FSQ indices from packed categorical logits.
+
+    With ``straight_through_hard=True`` the forward pass exactly unpacks the
+    argmax token used at deployment, while the backward pass follows the soft
+    categorical probabilities.
+    """
+    expected_vocab = num_levels**scalars_per_token
+    if logits.shape[-1] != expected_vocab:
+        raise ValueError(
+            f"Expected packed vocabulary {expected_vocab}, got {logits.shape[-1]}"
+        )
+    joint_probs = F.softmax(logits, dim=-1)
+    if straight_through_hard:
+        hard = F.one_hot(
+            joint_probs.argmax(dim=-1), num_classes=expected_vocab
+        ).to(joint_probs.dtype)
+        joint_probs = hard + joint_probs - joint_probs.detach()
+    joint_probs = joint_probs.reshape(
+        *logits.shape[:-1], *([num_levels] * scalars_per_token)
+    )
+    packed_rank = logits.ndim - 1
+    levels = torch.arange(num_levels, device=logits.device, dtype=logits.dtype)
+    expected_scalars = []
+    for scalar_index in range(scalars_per_token):
+        keep_axis = packed_rank + (scalars_per_token - 1 - scalar_index)
+        reduce_axes = tuple(
+            axis
+            for axis in range(packed_rank, packed_rank + scalars_per_token)
+            if axis != keep_axis
+        )
+        marginal = joint_probs.sum(dim=reduce_axes) if reduce_axes else joint_probs
+        expected_scalars.append((marginal * levels).sum(dim=-1))
+    return torch.stack(expected_scalars, dim=-1).flatten(start_dim=-2)
 
 
 class DiscretePriorPEFTSFTModel(DiscretePriorPEFTModel):
@@ -132,7 +178,15 @@ class DiscretePriorPEFTSFTModel(DiscretePriorPEFTModel):
             mode=self.config.token_perturb_mode,
         )
         prior_dict = self._actor.build_prior_input(tensordict, tokens=teacher_tokens)
-        tensordict[LATENT_LOGITS_KEY] = self._actor(prior_dict)
+        student_prefix_rate = float(
+            getattr(self.config, "autoregressive_student_prefix_rate", 0.0)
+        )
+        if student_prefix_rate > 0.0:
+            tensordict[LATENT_LOGITS_KEY] = self._actor.forward_with_student_prefixes(
+                prior_dict, student_prefix_rate
+            )
+        else:
+            tensordict[LATENT_LOGITS_KEY] = self._actor(prior_dict)
         return tensordict
 
     def compute_model_loss(
@@ -148,22 +202,137 @@ class DiscretePriorPEFTSFTModel(DiscretePriorPEFTModel):
             zero_loss=zero_loss,
             log_prefix=log_prefix,
         )
-        weight = float(self.config.fsq_scalar_aux_weight)
-        if weight <= 0.0:
-            return loss, logs
-        scalar_loss, scalar_accuracy = factorized_fsq_cross_entropy(
-            tensordict[LATENT_LOGITS_KEY],
-            tensordict[TARGET_LATENT_KEY],
+        scalar_weight = float(self.config.fsq_scalar_aux_weight)
+        if scalar_weight > 0.0:
+            scalar_loss, scalar_accuracy = factorized_fsq_cross_entropy(
+                tensordict[LATENT_LOGITS_KEY],
+                tensordict[TARGET_LATENT_KEY],
+                num_levels=self._actor.num_fsq_levels,
+                scalars_per_token=self._actor.fsq_scalars_per_prior_token,
+            )
+            weighted = scalar_loss * scalar_weight
+            loss = loss + weighted
+            logs.update(
+                {
+                    f"{log_prefix}/fsq_scalar_cross_entropy": scalar_loss.detach(),
+                    f"{log_prefix}/fsq_scalar_accuracy": scalar_accuracy.detach(),
+                    f"{log_prefix}/fsq_scalar_aux_loss": weighted.detach(),
+                }
+            )
+
+        sequence_loss, sequence_logs = self._compute_sequence_action_loss(
+            tensordict, log_prefix=log_prefix
+        )
+        loss = loss + sequence_loss
+        logs.update(sequence_logs)
+        return loss, logs
+
+    def _expected_decoded_action(
+        self, tensordict: TensorDict, logits: torch.Tensor
+    ) -> torch.Tensor:
+        expected_indices = factorized_fsq_expected_indices(
+            logits,
             num_levels=self._actor.num_fsq_levels,
             scalars_per_token=self._actor.fsq_scalars_per_prior_token,
+            straight_through_hard=True,
         )
-        weighted = scalar_loss * weight
-        loss = loss + weighted
-        logs.update(
-            {
-                f"{log_prefix}/fsq_scalar_cross_entropy": scalar_loss.detach(),
-                f"{log_prefix}/fsq_scalar_accuracy": scalar_accuracy.detach(),
-                f"{log_prefix}/fsq_scalar_aux_loss": weighted.detach(),
-            }
+        fsq_codes = self._actor.fsq_indices_to_codes(expected_indices)
+        return self._actor._decode(tensordict.clone(), fsq_codes)
+
+    def _temporal_tensordict(
+        self, tensordict: TensorDict, prefix: str
+    ) -> TensorDict:
+        keys = [*self._actor.in_keys, TARGET_LATENT_KEY]
+        return TensorDict(
+            {key: tensordict[f"{prefix}{key}"] for key in keys},
+            batch_size=tensordict.batch_size,
+            device=tensordict.device,
         )
-        return loss, logs
+
+    @staticmethod
+    def _masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        return (values * mask).sum() / mask.sum().clamp_min(1.0)
+
+    def _compute_sequence_action_loss(
+        self, tensordict: TensorDict, *, log_prefix: str
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        action_weight = float(
+            getattr(self.config, "sequence_action_loss_weight", 0.0)
+        )
+        velocity_weight = float(
+            getattr(self.config, "sequence_velocity_loss_weight", 0.0)
+        )
+        acceleration_weight = float(
+            getattr(self.config, "sequence_acceleration_loss_weight", 0.0)
+        )
+        zero = tensordict[LATENT_LOGITS_KEY].sum() * 0.0
+        if max(action_weight, velocity_weight, acceleration_weight) <= 0.0:
+            return zero, {}
+
+        beta = float(getattr(self.config, "sequence_action_loss_beta", 0.05))
+        if beta <= 0.0:
+            raise ValueError("sequence_action_loss_beta must be positive")
+
+        predicted = self._expected_decoded_action(
+            tensordict, tensordict[LATENT_LOGITS_KEY]
+        )
+        oracle = tensordict["oracle_action"]
+        total = zero
+        logs = {}
+
+        action_loss = F.smooth_l1_loss(
+            predicted, oracle, beta=beta, reduction="none"
+        ).mean(dim=-1).mean()
+        if action_weight > 0.0:
+            total = total + action_weight * action_loss
+        logs[f"{log_prefix}/sequence_action_loss"] = action_loss.detach()
+
+        if velocity_weight > 0.0 or acceleration_weight > 0.0:
+            previous_td = self._temporal_tensordict(tensordict, "sequence_prev_")
+            previous_td = self.forward(previous_td)
+            previous_predicted = self._expected_decoded_action(
+                previous_td, previous_td[LATENT_LOGITS_KEY]
+            )
+            previous_oracle = tensordict["sequence_prev_oracle_action"]
+            predicted_velocity = predicted - previous_predicted
+            oracle_velocity = oracle - previous_oracle
+            velocity_error = F.smooth_l1_loss(
+                predicted_velocity,
+                oracle_velocity,
+                beta=beta,
+                reduction="none",
+            ).mean(dim=-1)
+            velocity_mask = tensordict["sequence_velocity_mask"].float()
+            velocity_loss = self._masked_mean(velocity_error, velocity_mask)
+            if velocity_weight > 0.0:
+                total = total + velocity_weight * velocity_loss
+            logs[f"{log_prefix}/sequence_velocity_loss"] = velocity_loss.detach()
+
+        if acceleration_weight > 0.0:
+            previous2_td = self._temporal_tensordict(tensordict, "sequence_prev2_")
+            previous2_td = self.forward(previous2_td)
+            previous2_predicted = self._expected_decoded_action(
+                previous2_td, previous2_td[LATENT_LOGITS_KEY]
+            )
+            previous2_oracle = tensordict["sequence_prev2_oracle_action"]
+            predicted_acceleration = (
+                predicted - 2.0 * previous_predicted + previous2_predicted
+            )
+            oracle_acceleration = oracle - 2.0 * previous_oracle + previous2_oracle
+            acceleration_error = F.smooth_l1_loss(
+                predicted_acceleration,
+                oracle_acceleration,
+                beta=beta,
+                reduction="none",
+            ).mean(dim=-1)
+            acceleration_mask = tensordict["sequence_acceleration_mask"].float()
+            acceleration_loss = self._masked_mean(
+                acceleration_error, acceleration_mask
+            )
+            total = total + acceleration_weight * acceleration_loss
+            logs[f"{log_prefix}/sequence_acceleration_loss"] = (
+                acceleration_loss.detach()
+            )
+
+        logs[f"{log_prefix}/sequence_action_aux_loss"] = total.detach()
+        return total, logs

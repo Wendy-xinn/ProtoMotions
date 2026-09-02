@@ -46,9 +46,39 @@ reproduction commands belong in Git.
   at least 96 frames apart, so selected windows overlap by at most 50%.
 - Uses the official recording-disjoint EgoBody splits.
 - Text rarity and coarse action-type rarity contribute to selection ranking.
+- Known-bad windows are excluded explicitly by the selection command, so the
+  same quality-filtered manifest can be regenerated on another machine.
 
 Use this version first for model comparison and ablations. It reduces temporal
 duplication while retaining enough training clips for online rollout.
+
+#### Scene and camera quality revision
+
+The latest manifest replaces two train windows whose ego scene observations
+were empty for all 192 frames:
+
+- `recording_20210923_S13_S05_01:2295` is replaced by
+  `recording_20210911_S06_S07_02:1717`.
+- `recording_20210923_S14_S03_01:1561` is replaced by
+  `recording_20210923_S13_S05_01:1335`.
+
+An intermediate candidate, `recording_20211002_S15_S17_02:3425`, is also
+excluded because its `cab_g_benches` scene mesh contains invalid face indices.
+These three exclusions are encoded in `scripts/select_egobody_training_sets.sh`,
+not applied as an unrecorded manifest edit.
+
+For every retargeted clip, camera grounding applies the clip's SOMA grounding
+offset to camera Z only. Camera X/Y and the measured EgoBody PV rotation remain
+unchanged. Training keeps the calibrated PV convention (`+X` right, `+Y` up,
+`-Z` forward); OpenCV conversion is visualization-only and is never written
+back into training data.
+
+The train scene map samples 32,768 mesh candidates into 256 causal ego points
+per frame and stores current-visibility, history age, and validity features.
+The current revision has 653 empty frames out of 124,800, spread over 14 clips,
+but no clip is empty for all 192 frames. Empty frames remain zero-padded and
+masked. The two replacement clips have no empty frame; all current-visible
+points pass the camera-front check.
 
 ### `sft_1000_192` (dense expansion)
 
@@ -88,8 +118,8 @@ The current `sft_diverse_800_192` distribution is:
 | coarse action type | clips | operational definition |
 |---|---:|---|
 | short translation with upper-body activity | 261 | root span 0.25--0.75 m plus raised/horizontal/close hands |
-| large translation with upper-body activity | 180 | root span at least 0.75 m plus upper-body activity |
-| in-place lower-body activity | 123 | root span below 0.25 m with a deep knee bend |
+| large translation with upper-body activity | 179 | root span at least 0.75 m plus upper-body activity |
+| in-place lower-body activity | 124 | root span below 0.25 m with a deep knee bend |
 | short translation | 86 | root span 0.25--0.75 m without a salient upper-body tag |
 | in-place upper-body activity | 81 | root span below 0.25 m with salient arm/hand activity |
 | in-place general motion | 31 | root span below 0.25 m without another salient tag |

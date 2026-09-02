@@ -68,6 +68,7 @@ class _MotionManager:
     def __init__(self, num_envs=2):
         self.motion_ids = torch.arange(num_envs)
         self.motion_times = torch.arange(num_envs, dtype=torch.float)
+        self.window_end_times = torch.full((num_envs,), 1.5)
         self.motion_weights = torch.ones(3)
         self.fixed = (
             torch.empty(0, dtype=torch.long),
@@ -86,6 +87,7 @@ class _Env:
     def __init__(self, num_envs=2):
         self.num_envs = num_envs
         self.dt = 0.5
+        self.max_episode_length = 3
         self.motion_manager = _MotionManager(num_envs)
         self.simulator = _Simulator()
         self.robot_config = SimpleNamespace(
@@ -215,10 +217,15 @@ def test_mimic_initialize_eval_creates_metrics_and_caches_environment_state(tmp_
     assert torch.equal(metrics["actions"].motion_lens, torch.tensor([2, 4, 3]))
     assert torch.equal(evaluator._cached_motion_ids, torch.tensor([0, 1]))
     assert torch.equal(evaluator._cached_motion_times, torch.tensor([0.0, 1.0]))
+    assert evaluator.env.max_episode_length == 6
 
     evaluator.cleanup_after_evaluation()
 
     assert evaluator.env.restored_state == {"state": torch.tensor(1)}
+    assert evaluator.env.max_episode_length == 3
+    assert torch.equal(
+        evaluator.motion_manager.window_end_times, torch.tensor([1.5, 1.5])
+    )
     assert evaluator._metrics is None
 
 
@@ -381,6 +388,9 @@ def test_mimic_hooks_set_motion_state_filter_active_frames_and_record_metrics(tm
 
     assert torch.equal(evaluator.motion_manager.motion_ids, torch.tensor([1, 0]))
     assert torch.equal(evaluator.motion_manager.motion_times, torch.zeros(2))
+    assert torch.equal(
+        evaluator.motion_manager.window_end_times, torch.tensor([2.5, 1.0])
+    )
     assert torch.equal(checked[0][0], torch.tensor([1]))
     assert torch.equal(checked[0][1], torch.tensor([0]))
     assert torch.equal(evaluator._metrics["actions"].data[1, 0], torch.tensor([1.0, 2.0]))
@@ -441,6 +451,30 @@ def test_mimic_evaluate_episode_parks_failed_envs_and_stops_batch(tmp_path):
 
     assert len(evaluator.env.step_actions) == 1
     assert torch.equal(parked[-1], torch.tensor([0, 1]))
+
+
+def test_mimic_evaluate_episode_counts_early_termination_as_failure(tmp_path):
+    evaluator = _evaluator(tmp_path)
+    evaluator._episode_ctx = MimicEpisodeContext(
+        motion_ids=torch.tensor([2, 0]),
+        frame_limits=torch.tensor([10, 10]),
+    )
+    evaluator._metrics = {"actions": _metric(num_motions=3, features=2)}
+    evaluator._motion_failed = torch.zeros(3, dtype=torch.bool)
+    evaluator._check_evaluation_failures = lambda env_ids, motion_ids: None
+
+    original_step = evaluator.env.step
+
+    def terminate_first_env(actions):
+        obs, rewards, dones, terminated, extras = original_step(actions)
+        terminated[0] = True
+        return obs, rewards, dones, terminated, extras
+
+    evaluator.env.step = terminate_first_env
+    evaluator.evaluate_episode(torch.tensor([0, 1]), max_steps=2)
+
+    assert torch.equal(evaluator._motion_failed, torch.tensor([False, False, True]))
+    assert torch.equal(evaluator.env.simulator.parked[0], torch.tensor([0]))
 
 
 def test_mimic_process_eval_results_updates_weights_and_additional_metrics(tmp_path):

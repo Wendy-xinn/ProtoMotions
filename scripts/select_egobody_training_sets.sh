@@ -38,6 +38,9 @@ cd "$REPO_ROOT"
     --output "$DATA_ROOT/sft_diverse_800_192/manifest.json" \
     --candidate-stride 48 \
     --split-clip-counts 650 75 75 \
-    --min-start-gap 96
+    --min-start-gap 96 \
+    --exclude-window recording_20210923_S13_S05_01:2295 \
+    --exclude-window recording_20210923_S14_S03_01:1561 \
+    --exclude-window recording_20211002_S15_S17_02:3425
 
 echo "Generated EgoBody dense-1000 and diverse-core-800 selections under $DATA_ROOT"

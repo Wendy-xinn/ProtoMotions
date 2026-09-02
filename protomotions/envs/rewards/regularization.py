@@ -57,6 +57,23 @@ def compute_action_smoothness(
     return delta_norm(current_processed_action, previous_processed_action)
 
 
+def compute_action_acceleration(
+    current_processed_action: Tensor,
+    previous_processed_action: Tensor,
+    previous_previous_processed_action: Tensor,
+    joint_weights: Optional[Tensor] = None,
+) -> Tensor:
+    """L2 norm of the second finite difference of processed actions."""
+    current_delta = current_processed_action - previous_processed_action
+    previous_delta = previous_processed_action - previous_previous_processed_action
+    acceleration = current_delta - previous_delta
+    if joint_weights is not None:
+        acceleration = acceleration * joint_weights.to(
+            device=acceleration.device, dtype=acceleration.dtype
+        )
+    return torch.linalg.vector_norm(acceleration, dim=-1)
+
+
 def compute_action_smoothness_logmeanexp(
     current_processed_action: Tensor,
     previous_processed_action: Tensor,

@@ -8,6 +8,8 @@ Usage:
     python examples/visualize_soma_scenes.py \
         --motion-file /path/to/motions.pt \
         --scene-file /path/to/scenes.pt \
+        --old-camera-file /path/to/ego_camera.pt \
+        --new-camera-file /path/to/ego_camera_z_aligned.pt \
         --mesh-root /path/to/meshes/   # directory containing .obj files
 """
 
@@ -268,6 +270,28 @@ def load_scene_data(scene_file: str) -> dict:
     return data
 
 
+def load_camera_data(camera_file: str) -> dict:
+    data = torch.load(camera_file, map_location="cpu", weights_only=False)
+    if not isinstance(data.get("motions"), list):
+        raise ValueError(f"Camera file has no motions list: {camera_file}")
+    return data
+
+
+def camera_clip_arrays(camera_data: dict, motion_idx: int):
+    clip = camera_data["motions"][motion_idx]
+    poses = clip["world_from_camera"].cpu().numpy().copy()
+    # EgoBody PV poses are OpenGL-style (+X right, +Y up, -Z forward), while
+    # Viser camera frustums use OpenCV axes (+X right, +Y down, +Z forward).
+    # Convert only the displayed camera frame; the world-space trajectory and
+    # the camera data consumed by scene observations remain unchanged.
+    pv_from_viser = np.diag([1.0, -1.0, -1.0])
+    poses[:, :3, :3] = poses[:, :3, :3] @ pv_from_viser
+    fy = clip["fy"].cpu().numpy()
+    vertical_fov = 2.0 * np.arctan(0.5 * float(clip["height"]) / fy)
+    aspect = float(clip["width"]) / float(clip["height"])
+    return poses, vertical_fov, aspect
+
+
 def get_motion_frames(data: dict, motion_idx: int):
     """Extract gts, grs, contacts for a specific motion."""
     start = data["length_starts"][motion_idx].item()
@@ -322,6 +346,18 @@ def main():
     )
     parser.add_argument("--scene-file", type=str, default=None, help="Scene file (.pt)")
     parser.add_argument(
+        "--old-camera-file",
+        type=str,
+        default=None,
+        help="Original measured/root-offset camera trajectory",
+    )
+    parser.add_argument(
+        "--new-camera-file",
+        type=str,
+        default=None,
+        help="Retarget-aligned camera trajectory",
+    )
+    parser.add_argument(
         "--mesh-root",
         type=str,
         default=None,
@@ -340,6 +376,22 @@ def main():
         print("Loading scene data...")
         scene_data = load_scene_data(args.scene_file)
         print(f"  {scene_data['num_original_scenes']} scenes")
+
+    old_camera_data = (
+        load_camera_data(args.old_camera_file) if args.old_camera_file else None
+    )
+    new_camera_data = (
+        load_camera_data(args.new_camera_file) if args.new_camera_file else None
+    )
+    for label, camera_data in (
+        ("old", old_camera_data),
+        ("new", new_camera_data),
+    ):
+        if camera_data is not None and len(camera_data["motions"]) != n_motions:
+            raise ValueError(
+                f"{label} camera has {len(camera_data['motions'])} clips, "
+                f"but motion file has {n_motions}"
+            )
 
     mesh_root = Path(args.mesh_root) if args.mesh_root else None
 
@@ -376,6 +428,20 @@ def main():
     with server.gui.add_folder("Scene"):
         show_scene = server.gui.add_checkbox("Show scene mesh", initial_value=True)
 
+    with server.gui.add_folder("Camera comparison"):
+        show_old_camera = server.gui.add_checkbox(
+            "Old measured camera", initial_value=old_camera_data is not None
+        )
+        show_new_camera = server.gui.add_checkbox(
+            "New retarget-aligned camera", initial_value=new_camera_data is not None
+        )
+        show_camera_paths = server.gui.add_checkbox(
+            "Full trajectories", initial_value=True
+        )
+        camera_delta = server.gui.add_text(
+            "Current position delta", initial_value="n/a", disabled=True
+        )
+
     # -- State --
     playing = False
     current_motion_idx = 0
@@ -385,6 +451,37 @@ def main():
     current_dt = 0.033
     current_n_frames = 0
     scene_mesh_handle = None
+    old_camera_poses = None
+    new_camera_poses = None
+    camera_path_handles = []
+
+    default_fov = np.deg2rad(60.0)
+    default_aspect = 16.0 / 9.0
+    for camera_data in (new_camera_data, old_camera_data):
+        if camera_data is not None:
+            _, fovs, default_aspect = camera_clip_arrays(camera_data, 0)
+            default_fov = float(fovs[0])
+            break
+    old_frustum = server.scene.add_camera_frustum(
+        "/camera_comparison/old",
+        fov=default_fov,
+        aspect=default_aspect,
+        scale=0.18,
+        color=(255, 185, 40),
+        thickness=2.0,
+        thickness_units="screen",
+        visible=old_camera_data is not None,
+    )
+    new_frustum = server.scene.add_camera_frustum(
+        "/camera_comparison/new",
+        fov=default_fov,
+        aspect=default_aspect,
+        scale=0.18,
+        color=(30, 220, 255),
+        thickness=2.0,
+        thickness_units="screen",
+        visible=new_camera_data is not None,
+    )
 
     # Create per-body viser handles (one frame + mesh per body)
     body_handles = {}
@@ -403,7 +500,10 @@ def main():
             current_contacts, \
             current_dt, \
             current_n_frames, \
-            scene_mesh_handle
+            scene_mesh_handle, \
+            old_camera_poses, \
+            new_camera_poses, \
+            camera_path_handles
         gts, grs, contacts, dt, n_frames = get_motion_frames(motion_data, idx)
         current_gts = gts
         current_grs = grs
@@ -413,6 +513,34 @@ def main():
         frame_slider.max = n_frames - 1
         frame_slider.value = 0
         motion_label.value = motion_names[idx]
+
+        for _, handle in camera_path_handles:
+            handle.remove()
+        camera_path_handles = []
+        old_camera_poses = None
+        new_camera_poses = None
+        if old_camera_data is not None:
+            old_camera_poses, _, _ = camera_clip_arrays(old_camera_data, idx)
+            camera_path_handles.append(
+                ("old", server.scene.add_spline_catmull_rom(
+                    "/camera_comparison/old_path",
+                    points=old_camera_poses[:, :3, 3],
+                    color=(255, 185, 40),
+                    thickness=0.012,
+                    visible=show_old_camera.value and show_camera_paths.value,
+                ))
+            )
+        if new_camera_data is not None:
+            new_camera_poses, _, _ = camera_clip_arrays(new_camera_data, idx)
+            camera_path_handles.append(
+                ("new", server.scene.add_spline_catmull_rom(
+                    "/camera_comparison/new_path",
+                    points=new_camera_poses[:, :3, 3],
+                    color=(30, 220, 255),
+                    thickness=0.012,
+                    visible=show_new_camera.value and show_camera_paths.value,
+                ))
+            )
 
         # Load scene mesh
         if scene_mesh_handle is not None:
@@ -440,6 +568,32 @@ def main():
         frame_idx = min(frame_idx, current_n_frames - 1)
         positions = current_gts[frame_idx]  # (23, 3)
         rotations = current_grs[frame_idx]  # (23, 4) xyzw
+
+        if old_camera_poses is not None:
+            old_pose = old_camera_poses[min(frame_idx, len(old_camera_poses) - 1)]
+            old_frustum.position = old_pose[:3, 3]
+            old_frustum.wxyz = tf.quaternion_from_matrix(old_pose)
+        old_frustum.visible = old_camera_poses is not None and show_old_camera.value
+        if new_camera_poses is not None:
+            new_pose = new_camera_poses[min(frame_idx, len(new_camera_poses) - 1)]
+            new_frustum.position = new_pose[:3, 3]
+            new_frustum.wxyz = tf.quaternion_from_matrix(new_pose)
+        new_frustum.visible = new_camera_poses is not None and show_new_camera.value
+        if old_camera_poses is not None and new_camera_poses is not None:
+            delta = new_pose[:3, 3] - old_pose[:3, 3]
+            camera_delta.value = (
+                f"{np.linalg.norm(delta) * 100.0:.1f} cm "
+                f"(dx={delta[0] * 100.0:+.1f}, dy={delta[1] * 100.0:+.1f}, "
+                f"dz={delta[2] * 100.0:+.1f})"
+            )
+            server.scene.add_line_segments(
+                "/camera_comparison/current_delta",
+                points=np.array([[old_pose[:3, 3], new_pose[:3, 3]]]),
+                colors=(240, 240, 240),
+                thickness=2.0,
+                thickness_units="screen",
+                visible=show_old_camera.value and show_new_camera.value,
+            )
 
         has_contacts = current_contacts is not None and show_contacts.value
         contact_frame = current_contacts[frame_idx] if has_contacts else None
@@ -489,6 +643,18 @@ def main():
         if scene_mesh_handle is not None:
             for h in scene_mesh_handle:
                 h.visible = show_scene.value
+
+    def update_camera_visibility() -> None:
+        old_frustum.visible = old_camera_poses is not None and show_old_camera.value
+        new_frustum.visible = new_camera_poses is not None and show_new_camera.value
+        for kind, handle in camera_path_handles:
+            enabled = show_old_camera.value if kind == "old" else show_new_camera.value
+            handle.visible = enabled and show_camera_paths.value
+        update_frame(int(frame_slider.value))
+
+    show_old_camera.on_update(lambda _: update_camera_visibility())
+    show_new_camera.on_update(lambda _: update_camera_visibility())
+    show_camera_paths.on_update(lambda _: update_camera_visibility())
 
     # Playback loop
     try:

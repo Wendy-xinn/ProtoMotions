@@ -347,6 +347,25 @@ def test_reward_factories_and_bundles_bind_expected_context_paths():
     assert _bindings(smooth)["current_processed_action"] == "current_processed_action"
     assert _params(smooth)["weight"] == -0.5
 
+    acceleration = factories.action_acceleration_factory(weight=-0.25)
+    assert (
+        _bindings(acceleration)["previous_previous_processed_action"]
+        == "previous_previous_processed_action"
+    )
+    assert _params(acceleration)["weight"] == -0.25
+
+    threshold_bonus = factories.tracking_threshold_bonus_factory(weight=0.3)
+    assert _bindings(threshold_bonus)["current_rigid_body_pos"] == "current.rigid_body_pos"
+    assert _bindings(threshold_bonus)["ref_rigid_body_rot"] == "mimic.ref_state.rigid_body_rot"
+    assert _params(threshold_bonus)["weight"] == 0.3
+
+    threshold_violation = factories.tracking_threshold_violation_factory(weight=-0.4)
+    assert (
+        _bindings(threshold_violation)["current_rigid_body_rot"]
+        == "current.rigid_body_rot"
+    )
+    assert _params(threshold_violation)["weight"] == -0.4
+
     bundle = factories.mimic_tracking_rewards_factory(
         gt_weight=1.0,
         gr_weight=2.0,
@@ -438,6 +457,12 @@ def test_reward_factories_and_bundles_bind_expected_context_paths():
     ]:
         component = factory_fn(weight=0.9, sigma=1.3)
         assert _params(component) == {"weight": 0.9, "sigma": 1.3}
+
+    body_indices = torch.tensor([3, 6])
+    orientation = factories.relative_body_ori_rew_factory(
+        weight=0.25, sigma=0.3, body_indices=body_indices
+    )
+    assert _params(orientation)["body_indices"] is body_indices
 
 
 def test_termination_and_metric_factories_bind_metadata_and_wrappers():

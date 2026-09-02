@@ -171,6 +171,13 @@ def test_lora_layer_and_mixed_conditioning_encoder_cover_plain_layers():
 
     assert out.shape == (2, 3, 4)
 
+    adapter_input = torch.randn(2, 3, 4)
+    task_condition = torch.randn(2, 3)
+    assert torch.allclose(
+        conditioned(task_condition, adapter_input, adapter_scale=0.0),
+        conditioned.transformer_layer(adapter_input),
+    )
+
 
 def test_dora_adapter_starts_near_frozen_prior_scale():
     layer = TransformerLayerWithDoRA(
@@ -452,6 +459,32 @@ def test_prior_with_peft_reference_can_be_pinned_and_clear_keeps_reference():
     peft.clear_peft()
     assert torch.all(layer.m == 0)
     assert torch.all(reference_layer.m == 0.25)
+
+
+def test_prior_with_peft_reference_can_be_reset_after_early_capture():
+    prior = _prior()
+    _materialize_prior(prior)
+    peft = DiscretePriorWithPEFT(
+        prior=prior,
+        conditioning_dim=6,
+        rank=2,
+        alpha=1.0,
+        peft_type="dora",
+        top_p=1.0,
+    )
+    peft.init_peft()
+    layer = peft.base_prior._transformer.layers[0]
+    layer.m.data.fill_(0.25)
+    peft.capture_reference()
+
+    layer.m.data.fill_(0.75)
+    peft.reset_reference()
+    assert peft.reference_ready is False
+    assert peft.reference_prior is None
+
+    assert peft.capture_reference() is True
+    reference_layer = peft.reference_prior._transformer.layers[0]
+    assert torch.all(reference_layer.m == 0.75)
 
 
 def test_prior_with_peft_film_input_norm_learns_until_reference_capture():

@@ -19,11 +19,28 @@ recording from leaking across splits.
 - Selected starts from one recording are at least 96 frames apart, limiting
   temporal overlap to 50%.
 - 8 coarse pose-motion action types and 91 pose-motion signatures.
-- 210 locomotion, 347 short-translation, and 243 in-place-motion clips.
+- 209 locomotion, 347 short-translation, and 244 in-place-motion clips.
 - 723 clip records have exact frame-level text alignment; 77 are explicitly
   recording-level only.
 
 Use `sft_diverse_800_192` for the first GPC and MaskedMimic comparison.
+
+The current diverse-core manifest includes a scene-quality revision. Two train
+windows with zero valid ego scene points across all 192 frames were removed:
+`recording_20210923_S13_S05_01:2295` and
+`recording_20210923_S14_S03_01:1561`. Their final replacements are
+`recording_20210911_S06_S07_02:1717` and
+`recording_20210923_S13_S05_01:1335`. A candidate from
+`recording_20211002_S15_S17_02:3425` is separately excluded because its scene
+mesh is malformed. All exclusions are command-line inputs in
+`scripts/select_egobody_training_sets.sh`.
+
+Retarget grounding changes camera Z by the same constant clip offset used for
+the humanoid; it does not change camera X/Y or rotation. Scene points are then
+queried using the grounded EgoBody PV pose with `-Z` as camera forward. The
+latest 650-clip train map uses 32,768 mesh candidates and 256 output points per
+frame. It contains 653 masked empty frames in total, 14 clips with at least one
+empty frame, and zero clips that are empty for the whole sequence.
 
 ### Dense expansion
 
@@ -50,8 +67,9 @@ exact clip captions.
 
 ## Artifacts
 
-The generated dataset directory is
-`data/motion_for_trackers/egobody_smpl_ego_v1/sft_1000_192/`:
+The generated dataset directories are
+`data/motion_for_trackers/egobody_smpl_ego_v1/sft_1000_192/` and
+`data/motion_for_trackers/egobody_smpl_ego_v1/sft_diverse_800_192/`:
 
 - `manifest.json`: shared clip IDs and source frame ranges for both baselines.
 - `clip_text_records.jsonl`: source declaration, motion statistics, tags, text
@@ -62,6 +80,11 @@ Regenerate the selection and both training packs with
 `scripts/prepare_egobody_1000x192.sh`. Generate both dense and diverse-core
 manifests with `scripts/select_egobody_training_sets.sh`. Set `EGOBODY_ROOT` and
 `EGOBODY_BODY_TEXT_ROOT` when using a different machine.
+
+Generated manifests, motion tensors, meshes, and scene maps are ignored by Git.
+Git stores the selector, exclusion list, preprocessing code, and this catalog;
+copy the generated artifacts separately or rebuild them from EgoBody after
+cloning the `ego` branch.
 
 ## Scope
 

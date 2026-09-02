@@ -233,6 +233,11 @@ def _merge_split(
         {
             "recording": f"egobody_online_{split}",
             "coordinate_system": "motion_world",
+            "camera_alignment": {
+                "method": "constant_per_clip_grounding_z_translation",
+                "rotation_changed": False,
+                "pose_convention": "EgoBody_PV_OpenGL_right_X_up_Y_forward_neg_Z",
+            },
             "source": str(Path(manifest["prepared_root"])),
             "motions": camera_motions,
             "clip_map": clip_map,

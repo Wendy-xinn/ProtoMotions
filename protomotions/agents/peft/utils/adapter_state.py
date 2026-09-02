@@ -27,6 +27,8 @@ def strip_actor_prefix(key: str) -> str:
 def is_adapter_state_key(key: str) -> bool:
     """Return True for keys that belong in a slim PEFT checkpoint."""
     key = strip_actor_prefix(key)
+    if key.startswith("reference_actor_peft_model."):
+        return False
     if key.startswith("prior_with_peft._anchor_transformer."):
         return False
     if key.startswith("prior_with_peft.reference_prior."):

@@ -378,8 +378,47 @@ def test_component_failure_buffers_accumulate_values_and_process_success_rate(tm
     assert num_items == 2
     assert log_dict["eval/height/failure_rate"] == 0.5
     assert log_dict["eval/speed/failure_rate"] == 0.5
+    assert log_dict["eval/height/first_failure_step_mean"] == 1.0
+    assert log_dict["eval/speed/first_failure_step_mean"] == 1.0
     assert log_dict["eval/height/max"] == pytest.approx(0.8)
     assert log_dict["eval/speed/min"] == pytest.approx(0.1)
+
+
+def test_process_eval_results_can_select_lowest_component_mean(tmp_path):
+    config = _config(
+        components={"error": _EvalComponent(threshold=1.0)},
+    )
+    config.score_component = "error"
+    config.score_component_minimize = True
+    evaluator = BaseEvaluator(_Agent(_Env(), tmp_path), _Fabric(), config)
+    evaluator._init_eval_component_buffers(num_eval_ids=1)
+    evaluator._eval_mask[:] = True
+    evaluator._component_value_sum["error"][:] = 0.25
+    evaluator._component_step_count["error"][:] = 1
+
+    log_dict, score, num_items = evaluator.process_eval_results()
+
+    assert log_dict["eval/error/mean"] == pytest.approx(0.25)
+    assert score == pytest.approx(-0.25)
+    assert num_items == 1
+
+
+def test_deterministic_policy_switch_is_restored(tmp_path):
+    class GenerationModule(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.deterministic_generation = False
+
+    evaluator = _evaluator(tmp_path)
+    module = GenerationModule()
+    evaluator.agent.model = module
+    evaluator.config.deterministic_policy = True
+
+    evaluator._set_deterministic_policy()
+    assert module.deterministic_generation is True
+
+    evaluator._restore_deterministic_policy()
+    assert module.deterministic_generation is False
 
 
 def test_process_eval_results_handles_no_evaluated_items(tmp_path):

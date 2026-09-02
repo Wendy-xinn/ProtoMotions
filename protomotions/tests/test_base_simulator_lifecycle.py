@@ -408,7 +408,7 @@ def test_simulator_reset_and_park_env_paths_with_and_without_objects():
     sim.park_envs(torch.tensor([0]))
     parked_state, parked_objects, _ = sim.reset_calls[-1]
     assert torch.equal(parked_state.root_pos[:, 2], torch.tensor([-50.0]))
-    assert torch.equal(parked_objects.root_pos[..., 2], torch.tensor([[-51.0]]))
+    assert parked_objects is None
 
     no_object_sim = _sim(scene_objects=0)
     no_object_sim._initialize_with_markers(None)

@@ -16,6 +16,7 @@ class RolloutActor(Enum):
 
     STUDENT = "student"
     EXPERT = "expert"
+    MIXED = "mixed"
 
     @classmethod
     def from_str(cls, value: str) -> "RolloutActor":

@@ -43,6 +43,7 @@ from protomotions.agents.peft.prior_config import (
     DiscretePriorPEFTRLFTAgentConfig,
     DiscretePriorPEFTSFTAgentConfig,
 )
+from protomotions.agents.supervised.config import RolloutActor
 from protomotions.components.motion_lib import MotionFileSwitchMode
 from protomotions.agents.ppo import agent as ppo_agent_module
 from protomotions.agents.ppo.utils import discount_values
@@ -161,6 +162,38 @@ class _OptimizerRecorder:
 
     def load_state_dict(self, state):
         self.loaded_state = state
+
+
+def test_rlft_warm_start_prefers_sft_parameter_ema():
+    agent = object.__new__(DiscretePriorPEFTRLFTAgent)
+    agent.model = nn.Linear(2, 1, bias=False)
+    agent.config = SimpleNamespace(pretrained_modules={})
+    agent._peft_loading_training_state = False
+    with torch.no_grad():
+        agent.model.weight.zero_()
+
+    DiscretePriorPEFTRLFTAgent._after_load_model_state_dict(
+        agent,
+        {"parameter_ema": {"weight": torch.tensor([[2.0, 3.0]])}},
+    )
+
+    assert torch.equal(agent.model.weight, torch.tensor([[2.0, 3.0]]))
+
+
+def test_rlft_resume_does_not_replace_online_weights_with_sft_ema():
+    agent = object.__new__(DiscretePriorPEFTRLFTAgent)
+    agent.model = nn.Linear(2, 1, bias=False)
+    agent.config = SimpleNamespace(pretrained_modules={})
+    agent._peft_loading_training_state = True
+    with torch.no_grad():
+        agent.model.weight.fill_(1.0)
+
+    DiscretePriorPEFTRLFTAgent._after_load_model_state_dict(
+        agent,
+        {"parameter_ema": {"weight": torch.tensor([[2.0, 3.0]])}},
+    )
+
+    assert torch.equal(agent.model.weight, torch.ones(1, 2))
 
 
 class _SingleRankFabric:
@@ -321,6 +354,9 @@ class _LatentActor(_Actor):
             prior_dict["extra_context"] = extra_context
         return prior_dict
 
+    def build_reference_prior_input(self, batch, tokens=None):
+        return self.build_prior_input(batch, tokens=tokens)
+
     def one_hot_prior_tokens(self, indices):
         return torch.nn.functional.one_hot(indices, num_classes=self.prior_token_vocab_size).float()
 
@@ -358,6 +394,7 @@ def test_prior_peft_captures_rl_reference_once_and_optionally_clears_student():
     agent = _agent(has_critic=True)
     peft = _PEFT()
     agent.model._actor.prior_with_peft = peft
+    agent.model._actor.capture_reference = peft.capture_reference
     agent.config.model.actor.peft.clear_peft = True
 
     DiscretePriorPEFTRLFTAgent._prepare_rlft_prior_reference(agent)
@@ -388,6 +425,8 @@ def test_prior_peft_requires_reference_when_loading_training_state():
     agent = _agent(has_critic=True)
     peft = _PEFT(ready=True)
     agent.model._actor.prior_with_peft = peft
+    agent.model._actor.require_reference = peft.require_reference
+    agent.model._actor.capture_reference = peft.capture_reference
 
     DiscretePriorPEFTRLFTAgent._prepare_rlft_prior_reference(
         agent,
@@ -399,11 +438,53 @@ def test_prior_peft_requires_reference_when_loading_training_state():
 
     peft = _PEFT(ready=False)
     agent.model._actor.prior_with_peft = peft
+    agent.model._actor.require_reference = peft.require_reference
+    agent.model._actor.capture_reference = peft.capture_reference
     with pytest.raises(RuntimeError, match="missing reference"):
         DiscretePriorPEFTRLFTAgent._prepare_rlft_prior_reference(
             agent,
             require_existing=True,
         )
+
+
+def test_prior_peft_warm_start_recaptures_reference_after_model_load(monkeypatch):
+    calls = []
+
+    class _PEFT:
+        def reset_reference(self):
+            calls.append("reset")
+
+        def capture_reference(self):
+            calls.append("capture")
+            return True
+
+        def clear_peft(self):
+            calls.append("clear")
+
+    def fake_parent_load(self, checkpoint, load_env=True, load_training_state=True):
+        calls.append("load")
+
+    monkeypatch.setattr(
+        fine_tuning_agent_module.FineTuningAgent,
+        "load",
+        fake_parent_load,
+    )
+    agent = _agent(has_critic=True)
+    peft = _PEFT()
+    agent.model._actor.prior_with_peft = peft
+    agent.model._actor.reset_reference = peft.reset_reference
+    agent.model._actor.capture_reference = peft.capture_reference
+    agent.config.model.actor.peft.clear_peft = False
+
+    DiscretePriorPEFTRLFTAgent.load(
+        agent,
+        Path("sft.ckpt"),
+        load_env=False,
+        load_training_state=False,
+    )
+
+    assert calls == ["load", "reset", "capture"]
+
 
 def test_prior_peft_clamps_dora_m_from_config():
     class _Layer(nn.Module):
@@ -668,6 +749,82 @@ def test_prior_peft_init_rejects_missing_rlft_critic_or_sft_critic(monkeypatch):
             SimpleNamespace(model=SimpleNamespace(critic=SimpleNamespace())),
         )
 
+
+def test_sft_student_rollout_advances_student_and_labels_visited_state():
+    calls = []
+    student_action = torch.tensor([[1.0], [2.0]])
+    target_tokens = torch.tensor([[3, 4], [5, 6]])
+
+    class Model:
+        def collect_student_rollout(self, obs_td):
+            calls.append(("student", obs_td["state"].clone()))
+            return TensorDict(
+                {"action": student_action, "prior_tokens": target_tokens + 10},
+                batch_size=2,
+            )
+
+        def collect_expert_rollout(self, obs_td):
+            calls.append(("expert", obs_td["state"].clone()))
+            return TensorDict(
+                {TARGET_LATENT_KEY: target_tokens, "action": student_action * 0},
+                batch_size=2,
+            )
+
+    agent = object.__new__(DiscretePriorPEFTSFTAgent)
+    agent.config = SimpleNamespace(rollout_actor=RolloutActor.STUDENT)
+    agent.model = Model()
+    obs_td = TensorDict({"state": torch.tensor([[7.0], [8.0]])}, batch_size=2)
+
+    output = DiscretePriorPEFTSFTAgent._collect_rollout_output(agent, obs_td)
+
+    assert [name for name, _ in calls] == ["student", "expert"]
+    assert torch.equal(output["action"], student_action)
+    assert torch.equal(output["prior_tokens"], target_tokens + 10)
+    assert torch.equal(output[TARGET_LATENT_KEY], target_tokens)
+
+
+def test_sft_mixed_rollout_caps_consecutive_student_actions():
+    student_action = torch.tensor([[1.0], [2.0]])
+    expert_action = torch.tensor([[-1.0], [-2.0]])
+    target_tokens = torch.tensor([[3, 4], [5, 6]])
+
+    class Model:
+        def collect_student_rollout(self, obs_td):
+            return TensorDict(
+                {"action": student_action, "prior_tokens": target_tokens + 10},
+                batch_size=2,
+            )
+
+        def collect_expert_rollout(self, obs_td):
+            return TensorDict(
+                {TARGET_LATENT_KEY: target_tokens, "action": expert_action},
+                batch_size=2,
+            )
+
+    agent = object.__new__(DiscretePriorPEFTSFTAgent)
+    agent.config = SimpleNamespace(
+        rollout_actor=RolloutActor.MIXED,
+        dagger_beta_schedule=[0.0],
+        dagger_success_thresholds=[],
+        dagger_max_consecutive_student_steps=2,
+    )
+    agent._dagger_stage = 0
+    agent._dagger_student_streak = None
+    agent._dagger_expert_choices = 0
+    agent._dagger_total_choices = 0
+    agent.device = torch.device("cpu")
+    agent.model = Model()
+    obs_td = TensorDict({"state": torch.tensor([[7.0], [8.0]])}, batch_size=2)
+
+    actions = [
+        DiscretePriorPEFTSFTAgent._collect_rollout_output(agent, obs_td)["action"]
+        for _ in range(4)
+    ]
+
+    assert torch.equal(actions[0], student_action)
+    assert torch.equal(actions[1], student_action)
+    assert torch.equal(actions[2], expert_action)
+    assert torch.equal(actions[3], student_action)
 
 def test_prior_peft_amp_agent_requires_critic_and_installs_amp_component(monkeypatch):
     def fake_prior_init(self, fabric, env, config, root_dir=None):
@@ -1227,6 +1384,7 @@ def test_prior_peft_fit_runs_one_epoch_rollout_eval_and_checkpoint_branches(
     agent.current_epoch = 0
     agent.max_epochs = 1
     agent.fit_start_time = None
+    agent._fit_session_start_monotonic = None
     agent.step_count = 0
     agent._skip_next_policy_update = False
     agent.just_loaded_checkpoint_should_evaluate = False
@@ -1360,6 +1518,7 @@ def test_prior_peft_fit_skip_update_branch_can_stop_training(monkeypatch):
     agent.current_epoch = 0
     agent.max_epochs = 2
     agent.fit_start_time = 1.0
+    agent._fit_session_start_monotonic = None
     agent.step_count = 0
     agent._skip_next_policy_update = True
     agent.just_loaded_checkpoint_should_evaluate = False
@@ -1493,7 +1652,11 @@ def test_prior_peft_sft_model_teacher_forces_without_model_loss():
     model = object.__new__(DiscretePriorPEFTSFTModel)
     nn.Module.__init__(model)
     model._actor = actor
-    model.config = SimpleNamespace(token_perturb_rate=0.0, token_perturb_mode="replace")
+    model.config = SimpleNamespace(
+        token_perturb_rate=0.0,
+        token_perturb_mode="replace",
+        fsq_scalar_aux_weight=0.0,
+    )
     target = torch.tensor([[0, 1, 2], [2, 0, 3]])
     td = TensorDict({**_obs(), TARGET_LATENT_KEY: target}, batch_size=2)
 

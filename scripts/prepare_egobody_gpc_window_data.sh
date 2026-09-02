@@ -16,7 +16,7 @@ exec "$PYTHON_BIN" data/scripts/build_egobody_gt_ego_scene_maps.py \
     --split "$SPLIT" \
     --output-root "$OUTPUT_PACK" \
     --asset-root "$ASSET_ROOT" \
-    --candidate-points "${GPC_SCENE_CANDIDATES:-8192}" \
+    --candidate-points "${GPC_SCENE_CANDIDATES:-32768}" \
     --output-points "${GPC_SCENE_POINTS:-256}" \
     --pointcloud-workers "${GPC_SCENE_WORKERS:-8}" \
     --seed "${GPC_SCENE_SEED:-0}" \

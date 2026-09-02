@@ -1034,6 +1034,80 @@ def action_smoothness_factory(weight: float = -0.02) -> MdpComponent:
     )
 
 
+def action_acceleration_factory(
+    weight: float = -0.01,
+    joint_weights: torch.Tensor = None,
+) -> MdpComponent:
+    """Factory for second-difference processed-action regularization."""
+    from protomotions.envs.rewards import compute_action_acceleration
+
+    return MdpComponent(
+        compute_func=compute_action_acceleration,
+        dynamic_vars={
+            "current_processed_action": EnvContext.current_processed_action,
+            "previous_processed_action": EnvContext.previous_processed_action,
+            "previous_previous_processed_action": (
+                EnvContext.previous_previous_processed_action
+            ),
+        },
+        static_params={"weight": weight, "joint_weights": joint_weights},
+    )
+
+
+def tracking_threshold_bonus_factory(
+    weight: float = 0.25,
+    position_threshold: float = 0.35,
+    rotation_threshold: float = 0.70,
+    max_joint_threshold: float = 0.75,
+    temperature: float = 0.05,
+) -> MdpComponent:
+    """Factory for a soft reward matching mimic evaluation success criteria."""
+    from protomotions.envs.rewards import compute_tracking_threshold_bonus
+
+    return MdpComponent(
+        compute_func=compute_tracking_threshold_bonus,
+        dynamic_vars={
+            "current_rigid_body_pos": EnvContext.current.rigid_body_pos,
+            "ref_rigid_body_pos": EnvContext.mimic.ref_state.rigid_body_pos,
+            "current_rigid_body_rot": EnvContext.current.rigid_body_rot,
+            "ref_rigid_body_rot": EnvContext.mimic.ref_state.rigid_body_rot,
+        },
+        static_params={
+            "weight": weight,
+            "position_threshold": position_threshold,
+            "rotation_threshold": rotation_threshold,
+            "max_joint_threshold": max_joint_threshold,
+            "temperature": temperature,
+        },
+    )
+
+
+def tracking_threshold_violation_factory(
+    weight: float = -0.5,
+    position_threshold: float = 0.35,
+    rotation_threshold: float = 0.70,
+    max_joint_threshold: float = 0.75,
+) -> MdpComponent:
+    """Factory for hinge penalties outside mimic success thresholds."""
+    from protomotions.envs.rewards import compute_tracking_threshold_violation
+
+    return MdpComponent(
+        compute_func=compute_tracking_threshold_violation,
+        dynamic_vars={
+            "current_rigid_body_pos": EnvContext.current.rigid_body_pos,
+            "ref_rigid_body_pos": EnvContext.mimic.ref_state.rigid_body_pos,
+            "current_rigid_body_rot": EnvContext.current.rigid_body_rot,
+            "ref_rigid_body_rot": EnvContext.mimic.ref_state.rigid_body_rot,
+        },
+        static_params={
+            "weight": weight,
+            "position_threshold": position_threshold,
+            "rotation_threshold": rotation_threshold,
+            "max_joint_threshold": max_joint_threshold,
+        },
+    )
+
+
 def gt_rew_factory(weight: float = 0.5, coefficient: float = -100.0) -> MdpComponent:
     """Factory for position tracking reward.
 
@@ -1639,17 +1713,24 @@ def relative_body_pos_rew_factory(
 def relative_body_ori_rew_factory(
     weight: float = 1.0,
     sigma: float = 0.4,
+    body_indices: Optional[torch.Tensor] = None,
 ) -> MdpComponent:
     """Factory for relative body orientation reward (BeyondMimic).
 
     Args:
         weight: Reward weight.
         sigma: Gaussian kernel width.
+        body_indices: Optional 1-D LongTensor selecting which bodies to score.
+            None (default) scores every body.
 
     Returns:
         MdpComponent configured for relative body orientation reward.
     """
     from protomotions.envs.rewards import compute_relative_body_ori_rew
+
+    static_params: Dict[str, Any] = {"weight": weight, "sigma": sigma}
+    if body_indices is not None:
+        static_params["body_indices"] = body_indices
 
     return MdpComponent(
         compute_func=compute_relative_body_ori_rew,
@@ -1659,7 +1740,7 @@ def relative_body_ori_rew_factory(
             "current_anchor_rot": EnvContext.current.anchor_rot,
             "anchor_idx": EnvContext.mimic.anchor_idx,
         },
-        static_params={"weight": weight, "sigma": sigma},
+        static_params=static_params,
     )
 
 
@@ -2096,6 +2177,9 @@ __all__ = [
     "path_obs_factory",
     # Reward factories
     "action_smoothness_factory",
+    "action_acceleration_factory",
+    "tracking_threshold_bonus_factory",
+    "tracking_threshold_violation_factory",
     "gt_rew_factory",
     "gr_rew_factory",
     "gv_rew_factory",
