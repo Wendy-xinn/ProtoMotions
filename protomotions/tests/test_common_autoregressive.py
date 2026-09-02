@@ -15,6 +15,7 @@ from protomotions.agents.common.autoregressive import (
     DiscreteAutoregressiveTransformer,
     generate_causal_mask,
     kl_divergence_categorical,
+    kl_divergence_on_prior_support,
     kl_divergence_sampling_distribution,
     nucleus_sampling,
     nucleus_sampling_prior_constraint,
@@ -22,6 +23,21 @@ from protomotions.agents.common.autoregressive import (
     resolve_discrete_autoregressive_config,
     sampling_log_probs,
 )
+
+
+def test_kl_on_base_prior_support_ignores_logits_outside_support():
+    student = torch.tensor([[5.0, 1.0, 20.0]], requires_grad=True)
+    reference = torch.tensor([[4.0, 0.0, -20.0]])
+    support = torch.tensor([[5.0, 4.0, -20.0]])
+
+    loss = kl_divergence_on_prior_support(
+        student, reference, support, p=0.9
+    )
+
+    assert torch.isfinite(loss)
+    loss.backward()
+    assert student.grad is not None
+    assert student.grad[0, 2].abs() < 1e-5
 from protomotions.agents.common.config import (
     DiscreteAutoregressiveTransformerConfig,
     ModuleContainerConfig,
@@ -236,6 +252,39 @@ def test_prior_constrained_sampling_log_probs_masks_without_nan_actor_gradients(
     loss.backward()
 
     assert torch.isfinite(logits.grad).all()
+
+
+def test_prior_constrained_sampling_log_probs_floor_allowed_support():
+    logits = torch.tensor([[1000.0, -1000.0, 0.0]], requires_grad=True)
+    prior_logits = torch.tensor([[0.0, 0.0, -100.0]])
+
+    log_probs = prior_constrained_sampling_log_probs(
+        logits,
+        prior_logits,
+        p=0.99,
+        overlap_threshold=0.0,
+    )
+    loss = -log_probs[:, 1].sum()
+    loss.backward()
+
+    assert torch.isfinite(log_probs[:, :2]).all()
+    assert torch.isneginf(log_probs[:, 2]).all()
+    assert torch.isfinite(logits.grad).all()
+
+
+def test_prior_constrained_log_probs_retain_rollout_token_at_top_p_boundary():
+    logits = torch.tensor([[2.0, 1.0, 0.0]])
+    prior_logits = torch.tensor([[10.0, 0.0, -10.0]])
+
+    log_probs = prior_constrained_sampling_log_probs(
+        logits,
+        prior_logits,
+        p=0.5,
+        force_include=torch.tensor([2]),
+    )
+
+    assert torch.isfinite(log_probs[0, 2])
+    assert torch.allclose(log_probs.exp().sum(-1), torch.ones(1))
 
 
 def test_sampling_kl_handles_mismatched_nucleus_support_without_nan_gradients():

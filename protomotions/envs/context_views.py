@@ -630,6 +630,7 @@ class EnvContext:
     previous_action: Optional[Tensor] = FieldPath()
     current_processed_action: Optional[Tensor] = FieldPath()
     previous_processed_action: Optional[Tensor] = FieldPath()
+    previous_previous_processed_action: Optional[Tensor] = FieldPath()
 
     # Environment state
     env_ids: Optional[Tensor] = FieldPath()
@@ -686,6 +687,7 @@ class EnvContext:
         previous_action: Optional[Tensor] = None,
         current_processed_action: Optional[Tensor] = None,
         previous_processed_action: Optional[Tensor] = None,
+        previous_previous_processed_action: Optional[Tensor] = None,
         env_ids: Optional[Tensor] = None,
         ground_heights: Optional[Tensor] = None,
         noisy_ground_heights: Optional[Tensor] = None,
@@ -722,6 +724,8 @@ class EnvContext:
             previous_action: Previous raw action [num_envs, action_dim] (optional).
             current_processed_action: Current processed action (optional).
             previous_processed_action: Previous processed action (optional).
+            previous_previous_processed_action: Processed action two steps ago
+                (optional).
             env_ids: Optional subset represented by this context.
             ground_heights: Ground height beneath root position [num_envs] (optional).
             noisy_ground_heights: Noisy ground height for actor (optional).
@@ -754,6 +758,7 @@ class EnvContext:
         self.previous_action = previous_action
         self.current_processed_action = current_processed_action
         self.previous_processed_action = previous_processed_action
+        self.previous_previous_processed_action = previous_previous_processed_action
 
         # Environment state
         self.env_ids = env_ids

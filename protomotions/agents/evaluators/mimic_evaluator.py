@@ -70,6 +70,9 @@ class MimicEvaluator(BaseEvaluator):
 
     def initialize_eval(self) -> Dict:
         """Initialize evaluation tracking and cache env state for restoration."""
+        begin_weights = getattr(self.agent, "begin_evaluation_weights", None)
+        if begin_weights is not None:
+            begin_weights()
         num_motions = self.motion_lib.num_motions()
         motion_lengths = self.motion_lib.get_motion_length(None)
         motion_num_frames = (motion_lengths / self.env.dt).floor().long()
@@ -80,6 +83,14 @@ class MimicEvaluator(BaseEvaluator):
         self._env_snapshot = self.env.save_state()
         self._cached_motion_ids = self.motion_manager.motion_ids.clone()
         self._cached_motion_times = self.motion_manager.motion_times.clone()
+        self._cached_max_episode_length = self.env.max_episode_length
+        self.env.max_episode_length = max(
+            self.env.max_episode_length, self.config.max_eval_steps + 2
+        )
+        window_end_times = getattr(self.motion_manager, "window_end_times", None)
+        self._cached_window_end_times = (
+            window_end_times.clone() if window_end_times is not None else None
+        )
 
         return self._create_metrics(
             num_motions, motion_num_frames, self.config.max_eval_steps
@@ -174,6 +185,16 @@ class MimicEvaluator(BaseEvaluator):
         """
         ema_alpha = self.config.eval_action_ema_alpha
 
+        modules = getattr(self.agent.model, "modules", None)
+        for module in modules() if modules is not None else ():
+            reset_temporal = getattr(module, "reset_temporal_token_state", None)
+            if reset_temporal is not None:
+                reset_temporal()
+            if hasattr(module, "temporal_token_switch_penalty"):
+                module.temporal_token_switch_penalty = float(
+                    self.config.eval_token_switch_penalty or 0.0
+                )
+
         self._on_episode_start(env_ids)
 
         # Park envs that aren't part of this batch so they don't generate
@@ -206,6 +227,7 @@ class MimicEvaluator(BaseEvaluator):
                     ),
                 )
 
+            self._current_rollout_step = step_idx
             actions = self._policy_action(obs_td)
 
             # Apply EMA smoothing (deployment simulation)
@@ -216,6 +238,45 @@ class MimicEvaluator(BaseEvaluator):
                 prev_actions = actions.clone()
 
             obs, rewards, dones, terminated, extras = self.env.step(actions)
+            completed_step = step_idx + 1
+            if completed_step in getattr(self, "recovery_push_steps", set()):
+                active_env_ids = env_ids[active]
+                linear = torch.tensor(
+                    getattr(
+                        self,
+                        "recovery_push_linear_velocity",
+                        (0.0, 0.0, 0.0),
+                    ),
+                    device=self.device,
+                    dtype=torch.float,
+                ).repeat(active_env_ids.numel(), 1)
+                angular = torch.tensor(
+                    getattr(
+                        self,
+                        "recovery_push_angular_velocity",
+                        (0.0, 0.0, 0.0),
+                    ),
+                    device=self.device,
+                    dtype=torch.float,
+                ).repeat(active_env_ids.numel(), 1)
+                self.env.simulator._apply_root_velocity_impulse(
+                    linear, angular, active_env_ids
+                )
+                # The impulse is applied after physics. Refresh observations so
+                # the next policy action sees the disturbed simulator state.
+                self.env.compute_observations(
+                    active_env_ids,
+                    context=self.env._build_context(active_env_ids),
+                )
+                obs = self.env.get_obs()
+                logger.info(
+                    "Applied recovery impulse after eval step %d to %d envs: "
+                    "linear=%s, angular=%s",
+                    completed_step,
+                    active_env_ids.numel(),
+                    linear[0].tolist(),
+                    angular[0].tolist(),
+                )
             self.agent.pre_collect_step(step_idx + 1)
             obs = self.agent.add_agent_info_to_obs(obs)
             obs_td = self.agent.obs_dict_to_tensordict(obs)
@@ -237,6 +298,14 @@ class MimicEvaluator(BaseEvaluator):
                 else torch.zeros_like(active_motion_ids, dtype=torch.bool)
             )
             terminated_active = terminated[active_env_ids].bool()
+            # BaseEnv may auto-reset terminated environments inside step(). By
+            # the time component errors are checked above, their state can
+            # already be back at the reference pose. A physical early
+            # termination must therefore be recorded explicitly; otherwise it
+            # is silently counted as a successful full-motion rollout.
+            if terminated_active.any() and self._motion_failed is not None:
+                self._motion_failed[active_motion_ids[terminated_active]] = True
+                failed = self._motion_failed[active_motion_ids]
             deactivate = failed | terminated_active
             if deactivate.any():
                 failed_env_ids = active_env_ids[deactivate]
@@ -296,7 +365,9 @@ class MimicEvaluator(BaseEvaluator):
             self.motion_manager, "build_scene_matched_eval_batches", None
         )
         if scene_batch_builder is not None:
-            return scene_batch_builder()
+            return scene_batch_builder(
+                max_batch_size=self.config.fixed_motion_eval_batch_size
+            )
 
         fixed_motion_ids, first_env_indices = (
             self.motion_manager.get_unique_fixed_motions()
@@ -333,6 +404,11 @@ class MimicEvaluator(BaseEvaluator):
         """Set motion_ids/times in the motion manager before reset."""
         self.motion_manager.motion_ids[env_ids] = self._episode_ctx.motion_ids
         self.motion_manager.motion_times[env_ids] = 0.0
+        window_end_times = getattr(self.motion_manager, "window_end_times", None)
+        if window_end_times is not None:
+            window_end_times[env_ids] = self.motion_lib.get_motion_length(
+                self._episode_ctx.motion_ids
+            )
 
     def _get_reset_kwargs(self) -> dict:
         """Customize env.reset() for mimic evaluation."""
@@ -397,12 +473,20 @@ class MimicEvaluator(BaseEvaluator):
         """Restore env and motion manager state after evaluation."""
         self.motion_manager.motion_ids = self._cached_motion_ids
         self.motion_manager.motion_times = self._cached_motion_times
+        if self._cached_window_end_times is not None:
+            self.motion_manager.window_end_times = self._cached_window_end_times
+        self.env.max_episode_length = self._cached_max_episode_length
         self.env.restore_state(self._env_snapshot)
 
         del self._env_snapshot
         del self._cached_motion_ids
         del self._cached_motion_times
+        del self._cached_window_end_times
+        del self._cached_max_episode_length
         super().cleanup_after_evaluation()
+        end_weights = getattr(self.agent, "end_evaluation_weights", None)
+        if end_weights is not None:
+            end_weights()
 
     def _plot_per_frame_metrics(
         self, metrics: Dict, actions_storage: list = None

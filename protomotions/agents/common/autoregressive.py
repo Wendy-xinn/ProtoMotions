@@ -83,12 +83,17 @@ def prior_constrained_sampling_log_probs(
     p: float = 0.99,
     temperature: float = 1.0,
     overlap_threshold: float = 1e-3,
+    force_include: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Log-probs after constraining model support to the prior top-p nucleus."""
     _validate_sampling_temperature(temperature)
     prior_probs = F.softmax(prior_logits, dim=-1)
     model_probs = F.softmax(logits / temperature, dim=-1)
     keep_mask = _top_p_keep_mask(prior_probs, p)
+    if force_include is not None:
+        keep_mask = keep_mask.scatter(
+            -1, force_include.long().unsqueeze(-1), True
+        )
 
     filtered_probs = model_probs * keep_mask.float()
     prob_sums = filtered_probs.sum(dim=-1, keepdim=True)
@@ -103,7 +108,11 @@ def prior_constrained_sampling_log_probs(
         prob_sums = filtered_probs.sum(dim=-1, keepdim=True)
 
     filtered_probs = filtered_probs / (prob_sums + 1e-12)
-    return _log_probs_from_filtered_probs(filtered_probs)
+    return torch.where(
+        keep_mask,
+        filtered_probs.clamp(min=torch.finfo(filtered_probs.dtype).tiny).log(),
+        torch.full_like(filtered_probs, -torch.inf),
+    )
 
 
 def nucleus_sampling(logits: torch.Tensor, p: float = 0.9, temperature: float = 1.0):
@@ -216,6 +225,30 @@ def kl_divergence_sampling_distribution(
             floor_on_mask=True,
         )
     return kl_divergence_from_log_probs(log_p, log_q, reduction=reduction)
+
+
+def kl_divergence_on_prior_support(
+    logits: torch.Tensor,
+    reference_logits: torch.Tensor,
+    support_logits: torch.Tensor,
+    *,
+    p: float = 0.99,
+    temperature: float = 1.0,
+    reduction: str = "mean",
+):
+    """KL(student || reference) restricted to a third policy's top-p support."""
+    _validate_sampling_temperature(temperature)
+    support_probs = F.softmax(support_logits, dim=-1)
+    keep_mask = _top_p_keep_mask(support_probs, p)
+    log_student = _sampling_log_probs_from_keep_mask(
+        logits, keep_mask, temperature, floor_on_mask=True
+    )
+    log_reference = _sampling_log_probs_from_keep_mask(
+        reference_logits, keep_mask, temperature, floor_on_mask=True
+    )
+    return kl_divergence_from_log_probs(
+        log_student, log_reference, reduction=reduction
+    )
 
 
 def generate_causal_mask(
@@ -456,6 +489,7 @@ class DiscreteAutoregressiveTransformer(ProtoMotionsTensorDictModule):
         temperature: float = 1.0,
         top_p: float = 0.9,
         prior_constraint=None,
+        logit_bias=None,
         greedy: bool = False,
     ) -> TensorDict:
         was_training = self.training
@@ -468,6 +502,7 @@ class DiscreteAutoregressiveTransformer(ProtoMotionsTensorDictModule):
                 temperature=temperature,
                 top_p=top_p,
                 prior_constraint=prior_constraint,
+                logit_bias=logit_bias,
                 greedy=greedy,
             )
         finally:
@@ -513,6 +548,7 @@ class DiscreteAutoregressiveTransformer(ProtoMotionsTensorDictModule):
         temperature: float = 1.0,
         top_p: float = 0.9,
         prior_constraint=None,
+        logit_bias=None,
         greedy: bool = False,
         transformer: Optional[nn.Module] = None,
         pos_emb: Optional[torch.Tensor] = None,
@@ -531,6 +567,8 @@ class DiscreteAutoregressiveTransformer(ProtoMotionsTensorDictModule):
                 pos_emb=pos_emb,
                 transformer_kwargs=transformer_kwargs,
             )
+            if logit_bias is not None:
+                step_logits = logit_bias(step_logits, len(generated))
             if prior_constraint is None:
                 logp = sampling_log_probs(
                     step_logits,

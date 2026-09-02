@@ -81,6 +81,30 @@ def test_scene_window_manager_never_crosses_physical_scene_pools():
         assert int(manager.motion_ids[1]) in {2, 3}
 
 
+def test_scene_window_manager_respects_explicit_motion_subset():
+    manager = SceneWindowMotionManager(
+        SceneWindowMotionManagerConfig(
+            init_start_prob=1.0,
+            subset_method=[1],
+            motion_scene_ids=["a", "a", "b", "b"],
+            window_size_frames=192,
+            fixed_window_stride_frames=192,
+            random_windows_per_clip=0,
+            sampler_seed=7,
+        ),
+        num_envs=1,
+        env_dt=1.0 / 30.0,
+        device=torch.device("cpu"),
+        motion_lib=_WindowMotionLib(),
+        scene_ids_per_env=["a"],
+    )
+
+    for _ in range(3):
+        manager.sample_motions(torch.tensor([0]))
+        assert manager.motion_ids.item() == 1
+        assert manager.motion_times.item() == 0.0
+
+
 def test_scene_window_manager_fixed_queue_covers_every_motion_transition():
     manager = _window_manager(random_windows_per_clip=0)
     starts_by_motion = {0: set(), 1: set()}

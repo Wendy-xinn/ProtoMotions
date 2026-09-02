@@ -111,7 +111,7 @@ class DiscretePriorPEFTConfig(TransformerPEFTConfig):
     prior_top_p: float = field(
         default=0.99,
         metadata={
-            "help": "Nucleus threshold for the frozen prior when "
+            "help": "Nucleus threshold for the adapter-free base prior when "
             "sampling_mode='prior_constraint'."
         },
     )
@@ -255,6 +255,15 @@ class DiscretePriorPEFTSFTModelConfig(DiscretePriorPEFTBaseModelConfig):
         default="replace",
         metadata={"help": "Token perturbation mode: replace, neighbor, or mixed."},
     )
+    autoregressive_student_prefix_rate: float = field(
+        default=0.0,
+        metadata={
+            "help": (
+                "Probability of feeding a straight-through student token instead "
+                "of the expert token at each within-frame autoregressive step."
+            )
+        },
+    )
     fsq_scalar_aux_weight: float = field(
         default=0.0,
         metadata={
@@ -263,6 +272,22 @@ class DiscretePriorPEFTSFTModelConfig(DiscretePriorPEFTBaseModelConfig):
                 "Zero preserves packed-token-only SFT."
             )
         },
+    )
+    sequence_action_loss_weight: float = field(
+        default=0.0,
+        metadata={"help": "Weight for differentiable decoded-action supervision."},
+    )
+    sequence_velocity_loss_weight: float = field(
+        default=0.0,
+        metadata={"help": "Weight for adjacent decoded-action delta matching."},
+    )
+    sequence_acceleration_loss_weight: float = field(
+        default=0.0,
+        metadata={"help": "Weight for decoded-action second-difference matching."},
+    )
+    sequence_action_loss_beta: float = field(
+        default=0.05,
+        metadata={"help": "Smooth-L1 beta used by decoded-action sequence losses."},
     )
 
 
@@ -300,6 +325,14 @@ class DiscretePriorPEFTRLFTAgentConfig(FineTuningAgentConfig):
             "target_kl * 1.5 for the current rollout update."
         },
     )
+    parameter_ema_decay: Optional[float] = field(
+        default=None,
+        metadata={"help": "EMA decay for trainable RLFT actor parameters."},
+    )
+    evaluate_parameter_ema: bool = field(
+        default=True,
+        metadata={"help": "Use RLFT actor EMA weights for physical evaluation."},
+    )
 
 
 @dataclass
@@ -319,6 +352,30 @@ class DiscretePriorPEFTSFTAgentConfig(SupervisedAgentConfig):
         default_factory=DiscretePriorPEFTSFTModelConfig
     )
     rollout_actor: RolloutActor = RolloutActor.EXPERT
+    dagger_beta_schedule: List[float] = field(
+        default_factory=lambda: [0.95, 0.90, 0.80, 0.70],
+        metadata={"help": "Expert-action probabilities for mixed DAgger stages."},
+    )
+    dagger_success_thresholds: List[float] = field(
+        default_factory=lambda: [0.25, 0.50, 0.70],
+        metadata={
+            "help": "Student-only success required to advance to each next beta."
+        },
+    )
+    dagger_max_consecutive_student_steps: int = field(
+        default=4,
+        metadata={
+            "help": "Safety cap on consecutive student actions during mixed rollout."
+        },
+    )
+    parameter_ema_decay: Optional[float] = field(
+        default=None,
+        metadata={"help": "EMA decay for trainable SFT parameters."},
+    )
+    evaluate_parameter_ema: bool = field(
+        default=True,
+        metadata={"help": "Use parameter EMA weights for physical evaluation."},
+    )
     loss: SupervisionLossConfig = field(
         default_factory=lambda: SupervisionLossConfig(
             loss_type=SupervisionLossType.DISCRETE_CROSS_ENTROPY,

@@ -56,7 +56,17 @@ class SceneWindowMotionManager(MimicMotionManager):
         self.scene_ids_per_env = [str(value) for value in scene_ids_per_env]
         self._rng = random.Random(config.sampler_seed)
         self._motions_by_scene: dict[str, list[int]] = defaultdict(list)
+        available_motion_ids = (
+            None
+            if self.available_motion_ids is None
+            else set(self.available_motion_ids.detach().cpu().tolist())
+        )
         for motion_id, scene_id in enumerate(config.motion_scene_ids):
+            if (
+                available_motion_ids is not None
+                and motion_id not in available_motion_ids
+            ):
+                continue
             self._motions_by_scene[str(scene_id)].append(motion_id)
         missing = sorted(set(self.scene_ids_per_env) - self._motions_by_scene.keys())
         if missing:
@@ -128,11 +138,31 @@ class SceneWindowMotionManager(MimicMotionManager):
         done = self.motion_times >= self.window_end_times
         return done if env_ids is None else done[env_ids]
 
-    def build_scene_matched_eval_batches(self):
+    def build_scene_matched_eval_batches(self, max_batch_size: Optional[int] = None):
         """Pair every motion with matching envs while filling all scenes per round."""
         envs_by_scene: dict[str, list[int]] = defaultdict(list)
         for env_id, scene_id in enumerate(self.scene_ids_per_env):
             envs_by_scene[scene_id].append(env_id)
+
+        if max_batch_size is not None:
+            if max_batch_size < len(self._motions_by_scene):
+                raise ValueError(
+                    "fixed_motion_eval_batch_size must cover every physical scene: "
+                    f"got {max_batch_size}, need at least {len(self._motions_by_scene)}"
+                )
+            limited_envs = {scene_id: [] for scene_id in self._motions_by_scene}
+            while sum(map(len, limited_envs.values())) < max_batch_size:
+                added = False
+                for scene_id in self._motions_by_scene:
+                    index = len(limited_envs[scene_id])
+                    if index < len(envs_by_scene[scene_id]):
+                        limited_envs[scene_id].append(envs_by_scene[scene_id][index])
+                        added = True
+                        if sum(map(len, limited_envs.values())) >= max_batch_size:
+                            break
+                if not added:
+                    break
+            envs_by_scene = limited_envs
 
         offsets = {scene_id: 0 for scene_id in self._motions_by_scene}
         batches = []

@@ -10,6 +10,7 @@ the pretrained prior model itself lives in the Supervised latent-prior package.
 
 from __future__ import annotations
 
+import copy
 import logging
 
 import torch
@@ -84,6 +85,7 @@ class DiscretePriorPEFTActor(nn.Module):
             )
         ActorPEFTModelClass = get_class(actor_model_config._target_)
         self.actor_peft_model = ActorPEFTModelClass(config=actor_model_config)
+        self.reference_actor_peft_model = None
         if self.condition_key not in self.actor_peft_model.out_keys:
             raise AssertionError(
                 "DiscretePriorPEFTActor PEFT model must produce condition_key "
@@ -166,7 +168,7 @@ class DiscretePriorPEFTActor(nn.Module):
 
     def optional_full_checkpoint_state_prefixes(self) -> tuple[str, ...]:
         """Frozen target encoder state is present only for SFT/checkpointing flows."""
-        return ("target_latent_encoder.",)
+        return ("target_latent_encoder.", "reference_actor_peft_model.")
 
     def adapter_state_dict(self) -> dict[str, torch.Tensor]:
         """Return only PEFT adapter weights, excluding the frozen prior."""
@@ -191,7 +193,75 @@ class DiscretePriorPEFTActor(nn.Module):
         self.latent_decoder.quantizer.eval()
         self.prior_with_peft.base_prior.eval()
         self.prior_with_peft.train(mode)
+        if self.reference_actor_peft_model is not None:
+            self.reference_actor_peft_model.eval()
         return self
+
+    @property
+    def reference_ready(self) -> bool:
+        return (
+            self.reference_actor_peft_model is not None
+            and self.prior_with_peft.reference_ready
+        )
+
+    def _freeze_reference_actor_model(self) -> None:
+        if self.reference_actor_peft_model is None:
+            return
+        self.reference_actor_peft_model.eval()
+        for parameter in self.reference_actor_peft_model.parameters():
+            parameter.requires_grad = False
+        for module in self.reference_actor_peft_model.modules():
+            if hasattr(module, "_freeze_running"):
+                module._freeze_running = True
+
+    def ensure_reference_modules(self) -> None:
+        self.prior_with_peft.ensure_reference_modules()
+        if self.reference_actor_peft_model is None:
+            self.reference_actor_peft_model = copy.deepcopy(self.actor_peft_model)
+        self._freeze_reference_actor_model()
+
+    @torch.no_grad()
+    def capture_reference(self) -> bool:
+        """Freeze a complete SFT actor snapshot for RLFT sampling and KL."""
+        if self.reference_ready:
+            return False
+        self.ensure_reference_modules()
+        self.reference_actor_peft_model.load_state_dict(
+            self.actor_peft_model.state_dict()
+        )
+        self._freeze_reference_actor_model()
+        self.prior_with_peft.capture_reference()
+        reference_prior = getattr(self.prior_with_peft, "reference_prior", None)
+        reference_params = sum(
+            parameter.numel()
+            for parameter in self.reference_actor_peft_model.parameters()
+        )
+        if reference_prior is not None:
+            reference_params += sum(
+                parameter.numel() for parameter in reference_prior.parameters()
+            )
+        log.info(
+            "Pinned complete frozen SFT reference actor (%s parameters)",
+            f"{reference_params:,}",
+        )
+        return True
+
+    def reset_reference(self) -> None:
+        """Discard any actor snapshot captured before warm-start loading."""
+        self.reference_actor_peft_model = None
+        self.prior_with_peft.reset_reference()
+
+    def mark_reference_loaded(self) -> None:
+        self.ensure_reference_modules()
+        self.prior_with_peft.mark_reference_loaded()
+        self._freeze_reference_actor_model()
+
+    def require_reference(self) -> None:
+        if self.reference_actor_peft_model is None:
+            raise RuntimeError(
+                "PEFT RLFT requires a frozen scene/head reference encoder."
+            )
+        self.prior_with_peft.require_reference()
 
     # ---- FSQ utilities ----
 
@@ -326,18 +396,19 @@ class DiscretePriorPEFTActor(nn.Module):
             device=first_tensor.device,
         )
 
-    def _run_actor_peft_model(self, d):
+    def _run_actor_peft_model(self, d, model=None):
         """Run the task-side conditioning network and validate its contract."""
+        model = self.actor_peft_model if model is None else model
         tensordict = self._to_tensordict(d)
         missing_keys = [
-            key for key in self.actor_peft_model.in_keys if key not in tensordict
+            key for key in model.in_keys if key not in tensordict
         ]
         if missing_keys:
             raise ValueError(
                 "DiscretePriorPEFTActor actor PEFT model in_keys must be present in "
                 f"the input TensorDict. Missing keys: {missing_keys}"
             )
-        tensordict = self.actor_peft_model(tensordict)
+        tensordict = model(tensordict)
         if self.condition_key not in tensordict:
             raise RuntimeError(
                 "DiscretePriorPEFTActor actor PEFT model did not produce required "
@@ -367,17 +438,49 @@ class DiscretePriorPEFTActor(nn.Module):
             prior_dict["tokens"] = token_one_hot
         return prior_dict
 
+    @torch.no_grad()
+    def build_reference_prior_input(
+        self,
+        tensordict,
+        tokens: torch.Tensor | None = None,
+    ):
+        """Build frozen-reference inputs independently from raw observations."""
+        self.require_reference()
+        input_td = self._run_actor_peft_model(
+            tensordict,
+            model=self.reference_actor_peft_model,
+        )
+        prior_dict = {key: input_td[key] for key in self.frozen_prior_input_keys}
+        prior_dict[self.condition_key] = input_td[self.condition_key]
+        if tokens is not None:
+            prior_dict["tokens"] = self.one_hot_prior_tokens(tokens)
+        return prior_dict
+
     # ---- forward / rollout ----
 
     def forward(self, input_dict: dict):
         """Teacher-forced forward -> logits (B, num_prior_tokens, prior_token_vocab_size)."""
         return self.prior_with_peft(input_dict)
 
+    def forward_with_student_prefixes(self, input_dict: dict, rate: float):
+        return self.prior_with_peft.forward_with_student_prefixes(input_dict, rate)
+
     def get_action_and_logp(self, tensordict):
         """Rollout step: generate action + per-token log-probs for PPO."""
+        if (
+            self.prior_with_peft.sampling_mode == "prior_constraint"
+            and not self.reference_ready
+        ):
+            self.capture_reference()
         prior_dict = self.build_prior_input(tensordict)
+        reference_prior_dict = (
+            self.build_reference_prior_input(tensordict)
+            if self.prior_with_peft.sampling_mode == "prior_constraint"
+            else None
+        )
         prior_tokens, logprob = self.prior_with_peft.generate(
             prior_dict,
+            reference_input_dict=reference_prior_dict,
             return_logits=False,
             return_logprob=True,
         )

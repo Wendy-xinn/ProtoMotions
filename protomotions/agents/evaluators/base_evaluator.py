@@ -92,6 +92,7 @@ class BaseEvaluator:
         self._motion_failed: Optional[Tensor] = None
         self._eval_mask: Optional[Tensor] = None
         self._per_component_failures: Dict[str, Tensor] = {}
+        self._component_first_failure_step: Dict[str, Tensor] = {}
         self._component_value_sum: Dict[str, Tensor] = {}
         self._component_value_min: Dict[str, Tensor] = {}
         self._component_value_max: Dict[str, Tensor] = {}
@@ -133,8 +134,10 @@ class BaseEvaluator:
 
         self.agent.eval()
         self._disable_perturbations()
+        self._set_deterministic_policy()
         self._metrics = self.initialize_eval()
         if self._metrics is None:
+            self._restore_deterministic_policy()
             self._restore_perturbations()
             return {}, None, 0
 
@@ -142,6 +145,7 @@ class BaseEvaluator:
 
         evaluation_log, evaluated_score, num_eval_items = self.process_eval_results()
         self.cleanup_after_evaluation()
+        self._restore_deterministic_policy()
         self._restore_perturbations()
         self.eval_count += 1
 
@@ -259,7 +263,12 @@ class BaseEvaluator:
                     raise ValueError(
                         f"Unknown policy observation intervention: {intervention}"
                     )
-        if self.use_expert_rollout:
+        takeover_step = getattr(self, "oracle_takeover_step", None)
+        use_expert = self.use_expert_rollout or (
+            takeover_step is not None
+            and getattr(self, "_current_rollout_step", 0) >= takeover_step
+        )
+        if use_expert:
             expert_rollout = getattr(
                 self.agent.model, "collect_expert_rollout", None
             )
@@ -279,7 +288,7 @@ class BaseEvaluator:
                 else self.agent.model(obs_td)
             )
         if self.student_oracle_token_record_path is not None:
-            if self.use_expert_rollout:
+            if use_expert:
                 raise ValueError(
                     "Student/oracle token comparison requires student rollout."
                 )
@@ -356,6 +365,18 @@ class BaseEvaluator:
                     else:
                         failure_rate = 0.0
                     to_log[f"eval/{name}/failure_rate"] = failure_rate
+                    failed = self._per_component_failures[name] & evaluated
+                    if failed.any():
+                        first_steps = self._component_first_failure_step[name][failed]
+                        to_log[f"eval/{name}/first_failure_step_mean"] = (
+                            first_steps.float().mean().item()
+                        )
+                        to_log[f"eval/{name}/first_failure_step_min"] = (
+                            first_steps.min().item()
+                        )
+                        to_log[f"eval/{name}/first_failure_step_max"] = (
+                            first_steps.max().item()
+                        )
 
             for name in self._component_value_sum.keys():
                 step_count = self._component_step_count[name].float()
@@ -373,7 +394,20 @@ class BaseEvaluator:
                         self._component_value_min[name][valid].min().item()
                     )
 
-            return to_log, success_rate, num_eval_items
+            score = success_rate
+            score_component = getattr(self.config, "score_component", None)
+            if score_component is not None:
+                score_key = f"eval/{score_component}/mean"
+                if score_key not in to_log:
+                    raise KeyError(
+                        f"Checkpoint score component {score_component!r} did not "
+                        f"produce {score_key!r}. Available metrics: {sorted(to_log)}"
+                    )
+                score = to_log[score_key]
+                if getattr(self.config, "score_component_minimize", True):
+                    score = -score
+
+            return to_log, score, num_eval_items
 
         return to_log, None, 0
 
@@ -391,6 +425,7 @@ class BaseEvaluator:
         self._motion_failed = None
         self._eval_mask = None
         self._per_component_failures = {}
+        self._component_first_failure_step = {}
         self._component_value_sum = {}
         self._component_value_min = {}
         self._component_value_max = {}
@@ -417,6 +452,27 @@ class BaseEvaluator:
         self.env.robot_config.reset_noise = self._saved_reset_noise
         self.env.simulator._push_enabled = self._saved_push_enabled
 
+    def _set_deterministic_policy(self) -> None:
+        """Temporarily make discrete autoregressive evaluation reproducible."""
+        self._saved_deterministic_generation = []
+        if not getattr(self.config, "deterministic_policy", False):
+            return
+        modules = getattr(self.agent.model, "modules", None)
+        if modules is None:
+            return
+        for module in modules():
+            if hasattr(module, "deterministic_generation"):
+                old_value = module.deterministic_generation
+                self._saved_deterministic_generation.append((module, old_value))
+                module.deterministic_generation = True
+
+    def _restore_deterministic_policy(self) -> None:
+        for module, old_value in getattr(
+            self, "_saved_deterministic_generation", []
+        ):
+            module.deterministic_generation = old_value
+        self._saved_deterministic_generation = []
+
     def _init_eval_component_buffers(self, num_eval_ids: int) -> None:
         """Initialize per-component failure and value accumulators for this evaluation run."""
         if not self.config.evaluation_components:
@@ -430,6 +486,12 @@ class BaseEvaluator:
         )
         self._per_component_failures = {
             name: torch.zeros(num_eval_ids, dtype=torch.bool, device=self.device)
+            for name in self.config.evaluation_components.keys()
+        }
+        self._component_first_failure_step = {
+            name: torch.full(
+                (num_eval_ids,), -1, dtype=torch.long, device=self.device
+            )
             for name in self.config.evaluation_components.keys()
         }
         self._component_value_sum = {
@@ -479,6 +541,14 @@ class BaseEvaluator:
 
         for name, failures in component_failures.items():
             active_failures = failures[active_env_ids]
+            first_failure = self._component_first_failure_step[name][active_motion_ids]
+            newly_failed = active_failures & (first_failure < 0)
+            if newly_failed.any():
+                failure_steps = self._component_step_count[name][active_motion_ids] + 1
+                target_motion_ids = active_motion_ids[newly_failed]
+                self._component_first_failure_step[name][target_motion_ids] = (
+                    failure_steps[newly_failed]
+                )
             self._per_component_failures[name][active_motion_ids] = (
                 self._per_component_failures[name][active_motion_ids] | active_failures
             )
@@ -808,6 +878,9 @@ class BaseEvaluator:
         # Running averages for metrics
         metric_sums: Dict[str, float] = {}
         metric_counts: Dict[str, int] = {}
+        metric_series: Dict[str, list[float]] = {}
+        done_series: list[int] = []
+        applied_push_steps: list[int] = []
 
         print("Evaluating policy... (Ctrl+C to stop)")
         try:
@@ -817,6 +890,7 @@ class BaseEvaluator:
                 obs = self.agent.add_agent_info_to_obs(obs)
                 obs_td = self.agent.obs_dict_to_tensordict(obs)
 
+                self._current_rollout_step = step
                 action = self._policy_action(obs_td)
 
                 _, _, dones, _, extras = self.env.step(action)
@@ -827,19 +901,84 @@ class BaseEvaluator:
                         val = v.mean().item()
                         metric_sums[k] = metric_sums.get(k, 0.0) + val
                         metric_counts[k] = metric_counts.get(k, 0) + 1
+                        metric_series.setdefault(k, []).append(val)
 
                 done_indices = dones.nonzero(as_tuple=False).squeeze(-1)
                 step += 1
+                done_series.append(int(dones.sum().item()))
+                if step in getattr(self, "recovery_push_steps", set()):
+                    linear = torch.tensor(
+                        getattr(
+                            self,
+                            "recovery_push_linear_velocity",
+                            (0.0, 0.0, 0.0),
+                        ),
+                        device=self.device,
+                        dtype=torch.float,
+                    ).repeat(self.env.num_envs, 1)
+                    angular = torch.tensor(
+                        getattr(
+                            self,
+                            "recovery_push_angular_velocity",
+                            (0.0, 0.0, 0.0),
+                        ),
+                        device=self.device,
+                        dtype=torch.float,
+                    ).repeat(self.env.num_envs, 1)
+                    simulator._apply_root_velocity_impulse(
+                        linear,
+                        angular,
+                        torch.arange(self.env.num_envs, device=self.device),
+                    )
+                    applied_push_steps.append(step)
+                    print(
+                        f"Applied recovery impulse after simulation step {step}: "
+                        f"linear={linear[0].tolist()}, angular={angular[0].tolist()}"
+                    )
                 if max_steps is not None and step >= max_steps:
                     break
         except KeyboardInterrupt:
             print(f"\nStopped after {step} steps.")
+        finally:
             if collect_metrics and metric_counts:
-                print("Average metrics:")
+                print(f"Rollout finished after {step} steps. Average metrics:")
                 for k in sorted(metric_counts.keys()):
                     avg = metric_sums[k] / metric_counts[k]
                     print(f"  {k}: {avg:.4f}")
-        finally:
+            metrics_output = getattr(self, "rollout_metrics_output", None)
+            if metrics_output is not None:
+                import json
+
+                output_path = Path(metrics_output)
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                payload = {
+                    "num_steps": step,
+                    "applied_push_steps": applied_push_steps,
+                    "push_linear_velocity": list(
+                        getattr(
+                            self,
+                            "recovery_push_linear_velocity",
+                            (0.0, 0.0, 0.0),
+                        )
+                    ),
+                    "push_angular_velocity": list(
+                        getattr(
+                            self,
+                            "recovery_push_angular_velocity",
+                            (0.0, 0.0, 0.0),
+                        )
+                    ),
+                    "done_count_by_step": done_series,
+                    "metric_means": {
+                        key: metric_sums[key] / metric_counts[key]
+                        for key in sorted(metric_counts)
+                    },
+                    "metrics_by_step": metric_series,
+                }
+                output_path.write_text(
+                    json.dumps(payload, indent=2) + "\n", encoding="utf-8"
+                )
+                print(f"Rollout metrics saved to {output_path}")
             if self.target_token_record_path is not None:
                 output_path = Path(self.target_token_record_path)
                 output_path.parent.mkdir(parents=True, exist_ok=True)

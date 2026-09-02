@@ -94,3 +94,24 @@ def test_discrete_latent_ppo_loss_recomputes_prior_constrained_logprob():
     assert torch.allclose(metrics["actor/ratio"], torch.ones(()))
     assert torch.allclose(metrics["actor/kl"], torch.zeros(()))
     assert torch.allclose(metrics["actor/entropy"], torch.zeros(()))
+
+
+def test_discrete_latent_ppo_loss_stays_finite_when_support_changes():
+    logits = torch.tensor([[[0.0, 5.0, 0.0]]], requires_grad=True)
+    prior_logits = torch.tensor([[[8.0, 0.0, 0.0]]])
+
+    loss, metrics = compute_discrete_latent_ppo_loss(
+        logits=logits,
+        selected=torch.tensor([[1]]),
+        old_neglogp=torch.tensor([[0.2]]),
+        advantages=torch.ones(1),
+        e_clip=0.2,
+        top_p=0.5,
+        prior_logits=prior_logits,
+    )
+    loss.backward()
+
+    assert torch.isfinite(loss)
+    assert torch.isfinite(metrics["actor/ratio"])
+    assert torch.isfinite(metrics["actor/kl"])
+    assert torch.isfinite(logits.grad).all()

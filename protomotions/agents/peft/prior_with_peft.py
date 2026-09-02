@@ -85,6 +85,8 @@ class DiscretePriorWithPEFT(nn.Module):
         self.conditioning_dim = conditioning_dim
         self.sampling_mode = sampling_mode
         self.deterministic_generation = False
+        self.temporal_token_switch_penalty = 0.0
+        self._previous_frame_tokens = None
         self.film_input_norm = (
             NormObsBase(
                 NormObsBaseConfig(
@@ -282,6 +284,12 @@ class DiscretePriorWithPEFT(nn.Module):
         log.info("Pinned PEFT prior reference from current adapter state.")
         return True
 
+    def reset_reference(self) -> None:
+        """Discard a reference captured before warm-start weights were loaded."""
+        self.reference_prior = None
+        self.reference_film_input_norm = None
+        self._reference_ready = False
+
     @torch.no_grad()
     def clear_peft(self):
         """Zero adapter residuals on the active student; leave the reference intact."""
@@ -388,6 +396,62 @@ class DiscretePriorWithPEFT(nn.Module):
             transformer_kwargs=self._task_transformer_kwargs(input_dict),
         )
 
+    def forward_with_student_prefixes(
+        self,
+        input_dict: dict,
+        student_prefix_rate: float,
+    ) -> torch.Tensor:
+        """Return logits while feeding differentiable hard student prefixes."""
+        if not 0.0 <= student_prefix_rate <= 1.0:
+            raise ValueError("student_prefix_rate must be in [0, 1]")
+
+        bp = self.base_prior
+        context = self._context_embedding(input_dict)
+        transformer_kwargs = self._task_transformer_kwargs(input_dict)
+        expert_tokens = self._tokens(input_dict)
+        if expert_tokens.dim() == 3:
+            expert_one_hot = expert_tokens.float()
+        else:
+            expert_one_hot = torch.nn.functional.one_hot(
+                expert_tokens.long(), bp.vocab_size
+            ).float()
+
+        prefix = []
+        all_logits = []
+        for step in range(bp.num_tokens):
+            prefix_tensor = torch.stack(prefix, dim=1) if prefix else None
+            step_logits = bp.next_logits_from_context(
+                context,
+                token_indices=prefix_tensor,
+                transformer_kwargs=transformer_kwargs,
+            )
+            all_logits.append(step_logits)
+
+            probs = torch.softmax(step_logits, dim=-1)
+            hard = torch.nn.functional.one_hot(
+                probs.argmax(dim=-1), bp.vocab_size
+            ).to(probs.dtype)
+            student_token = hard + probs - probs.detach()
+            if student_prefix_rate == 1.0:
+                prefix.append(student_token)
+            elif student_prefix_rate == 0.0:
+                prefix.append(expert_one_hot[:, step])
+            else:
+                use_student = (
+                    torch.rand(
+                        student_token.shape[0], 1, device=student_token.device
+                    )
+                    < student_prefix_rate
+                )
+                prefix.append(
+                    torch.where(
+                        use_student,
+                        student_token,
+                        expert_one_hot[:, step],
+                    )
+                )
+        return torch.stack(all_logits, dim=1)
+
     @torch.no_grad()
     def forward_prior(self, input_dict: dict) -> torch.Tensor:
         """Teacher-forced forward using frozen prior (for KL loss computation).
@@ -403,12 +467,22 @@ class DiscretePriorWithPEFT(nn.Module):
             transformer_kwargs=self._reference_task_transformer_kwargs(input_dict),
         )
 
+    @torch.no_grad()
+    def forward_base_prior(self, input_dict: dict) -> torch.Tensor:
+        """Teacher-forced logits from the pretrained prior with PEFT disabled."""
+        return self.base_prior.forward_from_tokens(
+            self._context_embedding(input_dict),
+            self._tokens(input_dict),
+            transformer_kwargs={"adapter_scale": 0.0},
+        )
+
     # ---- generate (autoregressive) ----
 
     @torch.no_grad()
     def generate(
         self,
         input_dict: dict,
+        reference_input_dict: dict | None = None,
         return_logits: bool = True,
         return_logprob: bool = False,
     ):
@@ -421,24 +495,35 @@ class DiscretePriorWithPEFT(nn.Module):
             transformer_kwargs = self._task_transformer_kwargs(input_dict)
 
             prior_constraint = None
+            logit_bias = None
             top_p = self.top_p
+            previous_tokens = self._previous_frame_tokens
+            if (
+                self.temporal_token_switch_penalty > 0.0
+                and previous_tokens is not None
+                and previous_tokens.shape
+                == (context.shape[0], bp.num_tokens)
+            ):
+                penalty = float(self.temporal_token_switch_penalty)
+
+                def logit_bias(step_logits, step):
+                    return step_logits.scatter_add(
+                        1,
+                        previous_tokens[:, step : step + 1],
+                        step_logits.new_full((step_logits.shape[0], 1), penalty),
+                    )
             if self.sampling_mode == "prior_constraint":
                 # Nucleus+prior-constraint sampling first limits the candidate set by
                 # the frozen reference policy, then samples with the active adapter
                 # logits. The reference is fixed at RLFT start, so sampling remains
                 # stable while the student adapter changes.
-                if not self.reference_ready:
-                    self.capture_reference()
-                reference = self.reference_prior
-                reference_context = self._context_embedding(input_dict, prior=reference)
-                reference_kwargs = self._reference_task_transformer_kwargs(input_dict)
                 top_p = self.prior_top_p
 
                 def prior_constraint(token_indices, step):
-                    return reference.next_logits_from_context(
-                        reference_context,
+                    return bp.next_logits_from_context(
+                        context,
                         token_indices=token_indices,
-                        transformer_kwargs=reference_kwargs,
+                        transformer_kwargs={"adapter_scale": 0.0},
                     )
 
             indices, logits, logprob = bp.generate_from_context(
@@ -447,9 +532,12 @@ class DiscretePriorWithPEFT(nn.Module):
                 temperature=self.temperature,
                 top_p=top_p,
                 prior_constraint=prior_constraint,
+                logit_bias=logit_bias,
                 greedy=self.deterministic_generation,
                 transformer_kwargs=transformer_kwargs,
             )
+            if self.temporal_token_switch_penalty > 0.0:
+                self._previous_frame_tokens = indices.detach().clone()
         finally:
             self.train(was_training)
 
@@ -461,3 +549,6 @@ class DiscretePriorWithPEFT(nn.Module):
         if len(outputs) > 1:
             return tuple(outputs)
         return indices
+
+    def reset_temporal_token_state(self) -> None:
+        self._previous_frame_tokens = None

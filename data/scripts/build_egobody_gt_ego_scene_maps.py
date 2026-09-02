@@ -115,6 +115,7 @@ def main() -> None:
         device=device,
         terrain=None,
     )
+    camera_payload = torch.load(camera_path, map_location="cpu", weights_only=False)
     cameras = load_ego_camera_trajectory_params(str(camera_path), args.fps)
     cameras = {
         key: value.to(device) if isinstance(value, torch.Tensor) else value
@@ -182,6 +183,9 @@ def main() -> None:
             print(f"GT ego scene maps: {frame_id + 1}/{frame_count} frames")
 
     scene_map_path = split_root / "gt_ego_scene_maps.pt"
+    valid_mask = features[..., -1] > 0.5
+    valid_counts = valid_mask.sum(dim=-1)
+    empty_frames = int((valid_counts == 0).sum())
     _save(
         {
             "format_version": 1,
@@ -194,6 +198,15 @@ def main() -> None:
             "motion_scene_ids": motion_scene_ids,
             "causal": True,
             "coordinate_system": "gt_ego_camera",
+            "camera_pose_convention": "EgoBody_PV_OpenGL_right_X_up_Y_forward_neg_Z",
+            "feature_coordinate_system": "SOMA_camera_right_X_forward_neg_Y_up_Z",
+            "camera_alignment": camera_payload.get("camera_alignment"),
+            "validity_summary": {
+                "empty_frames": empty_frames,
+                "total_frames": int(valid_counts.numel()),
+                "minimum_valid_points": int(valid_counts.min()),
+                "mean_valid_points": float(valid_counts.float().mean()),
+            },
         },
         scene_map_path,
     )
@@ -212,6 +225,10 @@ def main() -> None:
         json.dumps(output_manifest, indent=2) + "\n", encoding="utf-8"
     )
     print(f"Wrote window pack: {split_root}")
+    print(
+        f"Scene validity: empty={empty_frames}/{valid_counts.numel()} frames, "
+        f"mean={float(valid_counts.float().mean()):.1f}/{args.output_points} points"
+    )
 
 
 if __name__ == "__main__":

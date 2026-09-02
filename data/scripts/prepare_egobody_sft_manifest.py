@@ -32,6 +32,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--retarget-device", default="cuda")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument(
+        "--recordings",
+        nargs="+",
+        default=None,
+        help="Rebuild only these recordings while retaining the complete manifest.",
+    )
+    parser.add_argument(
         "--skip-usd",
         action="store_true",
         help="Defer OBJ-to-USD scene conversion until cache collection.",
@@ -82,6 +88,12 @@ def main() -> None:
     env["PYTHONPATH"] = str(PROJECT_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
 
     recordings = sorted({clip["recording"] for clip in manifest["clips"]})
+    if args.recordings is not None:
+        requested = set(args.recordings)
+        unknown = requested.difference(recordings)
+        if unknown:
+            raise ValueError(f"Requested recordings are absent from manifest: {unknown}")
+        recordings = [recording for recording in recordings if recording in requested]
     for index, recording in enumerate(recordings, 1):
         clips = [clip for clip in manifest["clips"] if clip["recording"] == recording]
         starts = [str(clip["start"]) for clip in sorted(clips, key=lambda item: item["start"])]

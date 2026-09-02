@@ -53,10 +53,13 @@ class TransformerLayerWithLoRA(nn.Module):
         nn.init.zeros_(self.beta.weight)
         nn.init.zeros_(self.beta.bias)
 
-    def forward(self, c, x, **kwargs):
+    def forward(self, c, x, adapter_scale: float = 1.0, **kwargs):
+        base_output = self.transformer_layer(x, **kwargs)
+        if adapter_scale == 0.0:
+            return base_output
         c_mul = self.gamma(c)
         c_add = self.beta(c)
-        return self.transformer_layer(x, **kwargs) + self.lora(x, c_mul, c_add)
+        return base_output + adapter_scale * self.lora(x, c_mul, c_add)
 
 
 class TransformerLayerWithDoRA(nn.Module):
@@ -74,15 +77,17 @@ class TransformerLayerWithDoRA(nn.Module):
         nn.init.zeros_(self.beta.weight)
         nn.init.zeros_(self.beta.bias)
 
-    def forward(self, c, x, **kwargs):
+    def forward(self, c, x, adapter_scale: float = 1.0, **kwargs):
         transformer_output = self.transformer_layer(x, **kwargs)
+        if adapter_scale == 0.0:
+            return transformer_output
         c_mul = self.gamma(c)
         c_add = self.beta(c)
         lora_output = self.lora(x, c_mul, c_add)
         lora_output_norm = lora_output / (
             lora_output.norm(p=2, dim=-1, keepdim=True) + 1e-6
         )
-        return transformer_output + self.m * lora_output_norm
+        return transformer_output + adapter_scale * self.m * lora_output_norm
 
 
 # ---------------------------------------------------------------------------
@@ -97,12 +102,20 @@ class TransformerEncoderWithConditioning(nn.Module):
         super().__init__()
         self.layers = layers
 
-    def forward(self, x, task_c=None, mask=None, src_key_padding_mask=None):
+    def forward(
+        self,
+        x,
+        task_c=None,
+        mask=None,
+        src_key_padding_mask=None,
+        adapter_scale: float = 1.0,
+    ):
         for layer in self.layers:
             if hasattr(layer, "lora"):
                 x = layer(
                     task_c,
                     x,
+                    adapter_scale=adapter_scale,
                     src_mask=mask,
                     src_key_padding_mask=src_key_padding_mask,
                 )

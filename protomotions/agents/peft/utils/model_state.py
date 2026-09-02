@@ -22,6 +22,7 @@ from protomotions.agents.utils.normalization import (
 
 
 REFERENCE_FULL_CHECKPOINT_PREFIXES = (
+    "_actor.reference_actor_peft_model.",
     "_actor.prior_with_peft.reference_prior.",
     "_actor.prior_with_peft.reference_film_input_norm.",
 )
@@ -30,7 +31,9 @@ REFERENCE_FULL_CHECKPOINT_PREFIXES = (
 def has_reference_state(model_state: dict) -> bool:
     """Return True when a full PEFT checkpoint carries reference-policy state."""
     return any(
-        key.startswith("_actor.prior_with_peft.reference_prior.")
+        key.startswith("_actor.reference_actor_peft_model.")
+        or key.startswith("reference_actor_peft_model.")
+        or key.startswith("_actor.prior_with_peft.reference_prior.")
         or key.startswith("prior_with_peft.reference_prior.")
         or key.startswith("_actor.prior_with_peft.reference_film_input_norm.")
         or key.startswith("prior_with_peft.reference_film_input_norm.")
@@ -49,7 +52,7 @@ def load_compatible_peft_model_state(
 
     reference_state_present = has_reference_state(model_state)
     if reference_state_present:
-        module._actor.prior_with_peft.ensure_reference_modules()
+        module._actor.ensure_reference_modules()
     materialize_lazy_running_stats_from_state_dict(module, model_state)
     missing, unexpected = module.load_state_dict(model_state, strict=False)
     optional_prefixes = optional_full_checkpoint_state_prefixes(module)
@@ -69,7 +72,7 @@ def load_compatible_peft_model_state(
             f"missing={bad_missing}, unexpected={bad_unexpected}"
         )
     if reference_state_present:
-        module._actor.prior_with_peft.mark_reference_loaded()
+        module._actor.mark_reference_loaded()
 
 
 def optional_full_checkpoint_state_prefixes(module: nn.Module) -> tuple[str, ...]:

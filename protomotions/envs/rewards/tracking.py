@@ -87,6 +87,61 @@ def compute_gr_rew(
     )
 
 
+def compute_tracking_threshold_bonus(
+    current_rigid_body_pos: Tensor,
+    ref_rigid_body_pos: Tensor,
+    current_rigid_body_rot: Tensor,
+    ref_rigid_body_rot: Tensor,
+    position_threshold: float = 0.35,
+    rotation_threshold: float = 0.70,
+    max_joint_threshold: float = 0.75,
+    temperature: float = 0.05,
+) -> Tensor:
+    """Smooth bonus aligned with the evaluator's three success thresholds."""
+    position_errors = torch.linalg.vector_norm(
+        current_rigid_body_pos - ref_rigid_body_pos, dim=-1
+    )
+    mean_position_error = position_errors.mean(dim=-1)
+    max_joint_error = position_errors.max(dim=-1).values
+    mean_rotation_error = quat_angle_diff_norm(
+        current_rigid_body_rot, ref_rigid_body_rot, w_last=True
+    ).mean(dim=-1)
+
+    def soft_below(error: Tensor, threshold: float) -> Tensor:
+        return torch.sigmoid((threshold - error) / temperature)
+
+    return (
+        soft_below(mean_position_error, position_threshold)
+        * soft_below(mean_rotation_error, rotation_threshold)
+        * soft_below(max_joint_error, max_joint_threshold)
+    )
+
+
+def compute_tracking_threshold_violation(
+    current_rigid_body_pos: Tensor,
+    ref_rigid_body_pos: Tensor,
+    current_rigid_body_rot: Tensor,
+    ref_rigid_body_rot: Tensor,
+    position_threshold: float = 0.35,
+    rotation_threshold: float = 0.70,
+    max_joint_threshold: float = 0.75,
+) -> Tensor:
+    """Normalized hinge violation of the evaluator's success thresholds."""
+    position_errors = torch.linalg.vector_norm(
+        current_rigid_body_pos - ref_rigid_body_pos, dim=-1
+    )
+    mean_position_error = position_errors.mean(dim=-1)
+    max_joint_error = position_errors.max(dim=-1).values
+    mean_rotation_error = quat_angle_diff_norm(
+        current_rigid_body_rot, ref_rigid_body_rot, w_last=True
+    ).mean(dim=-1)
+    return (
+        torch.relu(mean_position_error - position_threshold) / position_threshold
+        + torch.relu(mean_rotation_error - rotation_threshold) / rotation_threshold
+        + torch.relu(max_joint_error - max_joint_threshold) / max_joint_threshold
+    )
+
+
 def compute_gv_rew(
     current_rigid_body_vel: Tensor,
     ref_rigid_body_vel: Tensor,

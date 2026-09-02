@@ -178,6 +178,33 @@ def test_base_rotation_and_power_primitives():
         ),
         torch.exp(torch.tensor([-0.9, -2.5])),
     )
+
+
+def test_tracking_threshold_bonus_rewards_states_inside_success_boundary():
+    ref_pos = torch.zeros(2, 3, 3)
+    current_pos = ref_pos.clone()
+    current_pos[1] = 1.0
+    ref_rot = _identity_quat(2, 3)
+    current_rot = ref_rot.clone()
+
+    bonus = tracking.compute_tracking_threshold_bonus(
+        current_pos,
+        ref_pos,
+        current_rot,
+        ref_rot,
+    )
+
+    assert bonus.shape == (2,)
+    assert bonus[0] > 0.99
+    assert bonus[1] < 0.01
+    violation = tracking.compute_tracking_threshold_violation(
+        current_pos,
+        ref_pos,
+        current_rot,
+        ref_rot,
+    )
+    assert violation[0] == 0.0
+    assert violation[1] > 0.0
     assert torch.allclose(
         base.velocity_squared_sum(torch.tensor([[[1.0, 2.0], [3.0, 4.0]]])),
         torch.tensor([30.0]),
@@ -205,6 +232,22 @@ def test_regularization_rewards_and_helpers():
     assert torch.allclose(
         regularization.compute_action_smoothness(current_action, previous_action),
         torch.tensor([2.0, 5.0]),
+    )
+    previous_previous_action = torch.tensor([[0.0, 0.0], [0.0, 0.0]])
+    assert torch.allclose(
+        regularization.compute_action_acceleration(
+            current_action, previous_action, previous_previous_action
+        ),
+        torch.tensor([2.0**0.5, 20.0**0.5]),
+    )
+    assert torch.allclose(
+        regularization.compute_action_acceleration(
+            current_action,
+            previous_action,
+            previous_previous_action,
+            joint_weights=torch.tensor([2.0, 0.5]),
+        ),
+        torch.tensor([4.25**0.5, 20.0**0.5]),
     )
     assert torch.allclose(
         regularization.compute_action_smoothness_logmeanexp(

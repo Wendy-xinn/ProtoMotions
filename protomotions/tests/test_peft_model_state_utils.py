@@ -182,7 +182,7 @@ def test_load_compatible_peft_model_state_requires_complete_reference_when_prese
 ):
     calls = []
 
-    class _PEFT:
+    class _Actor:
         def ensure_reference_modules(self):
             calls.append("ensure_reference")
 
@@ -192,7 +192,7 @@ def test_load_compatible_peft_model_state_requires_complete_reference_when_prese
     class _Model(nn.Module):
         def __init__(self):
             super().__init__()
-            self._actor = SimpleNamespace(prior_with_peft=_PEFT())
+            self._actor = _Actor()
 
         def load_state_dict(self, state_dict, strict=True):
             calls.append(("load", strict, dict(state_dict)))

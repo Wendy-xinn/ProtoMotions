@@ -1062,6 +1062,11 @@ class BaseEnv:
             )
             if (self.state_history and self.state_history.num_history_steps >= 1)
             else None,
+            previous_previous_processed_action=self._select_context_tensor(
+                self.state_history.processed_actions[:, 2], env_ids
+            )
+            if (self.state_history and self.state_history.num_history_steps >= 2)
+            else None,
             # Environment state
             env_ids=env_ids,
             ground_heights=ground_heights,

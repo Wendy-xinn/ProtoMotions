@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-"""Bind a calibrated EgoBody camera trajectory to grounded SOMA23 clips.
+"""Apply SOMA23 per-clip grounding translations to EgoBody cameras.
 
-``world_from_camera`` is already calibrated in the static-scene coordinate
-frame and must not be translated to compensate for skeleton retargeting. The
-runtime visibility observation relocates it into replicated simulator scenes
-using ``current_reference_root - camera_reference_root``. Store the grounded
-SOMA23 root as that anchor so the difference contains only the simulator's
-scene/spawn transform.
+The measured camera is already calibrated into the reconstructed scene frame.
+Grounding changes only world Z, so apply the same clip-level Z translation to
+the camera while preserving its measured orientation and the static scene.
 """
 
 from __future__ import annotations
@@ -17,6 +14,72 @@ import os
 from pathlib import Path
 
 import torch
+from protomotions.utils import rotations
+
+
+SOMA23_HEAD_ID = 6
+
+
+def validate_camera_motion_alignment(camera_data: dict, grounded_motion: dict) -> dict:
+    """Reject camera/person coordinate mismatches, especially 180-degree flips."""
+    starts = torch.as_tensor(grounded_motion["length_starts"], dtype=torch.long)
+    counts = torch.as_tensor(grounded_motion["motion_num_frames"], dtype=torch.long)
+    diagnostics = []
+    for motion_index, clip in enumerate(camera_data["motions"]):
+        start, count = int(starts[motion_index]), int(counts[motion_index])
+        camera = clip["world_from_camera"].float()
+        measured = clip["measured_world_from_camera"].float()
+        offset = float(clip["retarget_root_height_offset_m"])
+        if camera.shape[0] != count:
+            raise ValueError(f"Camera frame mismatch for motion {motion_index}")
+        if not torch.isfinite(camera).all():
+            raise ValueError(f"Non-finite camera pose in motion {motion_index}")
+        if not torch.allclose(camera[:, :3, :3], measured[:, :3, :3], atol=1e-6):
+            raise ValueError(f"Grounding changed camera rotation in motion {motion_index}")
+        expected_delta = torch.zeros_like(camera[:, :3, 3])
+        expected_delta[:, 2] = offset
+        actual_delta = camera[:, :3, 3] - measured[:, :3, 3]
+        if not torch.allclose(actual_delta, expected_delta, atol=1e-6):
+            raise ValueError(
+                f"Camera grounding is not a pure Z translation in motion {motion_index}"
+            )
+
+        head_pos = grounded_motion["gts"][start : start + count, SOMA23_HEAD_ID]
+        head_rot = grounded_motion["grs"][start : start + count, SOMA23_HEAD_ID]
+        head_forward = rotations.quat_rotate(
+            head_rot,
+            head_rot.new_tensor([0.0, -1.0, 0.0]).expand(count, -1),
+            w_last=True,
+        )
+        # EgoBody PV uses OpenGL-style -Z forward. This is the training-data
+        # convention; the OpenCV conversion belongs only in Viser rendering.
+        camera_forward = -camera[:, :3, 2]
+        forward_angle = torch.rad2deg(
+            torch.acos((head_forward * camera_forward).sum(-1).clamp(-1.0, 1.0))
+        )
+        head_distance = torch.linalg.vector_norm(camera[:, :3, 3] - head_pos, dim=-1)
+        forward_p95 = float(torch.quantile(forward_angle, 0.95))
+        distance_p95 = float(torch.quantile(head_distance, 0.95))
+        if forward_p95 >= 60.0:
+            raise ValueError(
+                f"Camera/Head forward-axis mismatch in motion {motion_index}: "
+                f"p95={forward_p95:.1f} deg"
+            )
+        if distance_p95 >= 0.5:
+            raise ValueError(
+                f"Camera is too far from Head in motion {motion_index}: "
+                f"p95={distance_p95:.3f} m"
+            )
+        diagnostics.append(
+            {
+                "motion_id": motion_index,
+                "head_camera_forward_median_deg": float(forward_angle.median()),
+                "head_camera_forward_p95_deg": forward_p95,
+                "head_camera_distance_median_m": float(head_distance.median()),
+                "head_camera_distance_p95_m": distance_p95,
+            }
+        )
+    return {"per_motion": diagnostics}
 
 
 def align_camera(camera_data: dict, grounded_motion: dict) -> dict:
@@ -81,8 +144,11 @@ def align_camera(camera_data: dict, grounded_motion: dict) -> dict:
                 f"Camera motion {motion_index} root shape {reference_root.shape} "
                 f"does not match target {target_root.shape}"
             )
-        # Preserve measured camera poses in the calibrated scene frame. Only
-        # replace the anchor used later for simulator scene replication.
+        motion["measured_world_from_camera"] = camera_poses.clone()
+        motion["world_from_camera"] = camera_poses.clone()
+        motion["world_from_camera"][:, 2, 3] += offset.to(
+            dtype=camera_poses.dtype
+        )
         motion["reference_root"] = target_root.to(dtype=reference_root.dtype)
         motion["retarget_root_height_offset_m"] = float(offset)
 
@@ -90,6 +156,13 @@ def align_camera(camera_data: dict, grounded_motion: dict) -> dict:
         "retarget_height_alignment", "constant_per_clip"
     )
     output["retarget_root_height_offsets_m"] = offsets
+    output["camera_alignment"] = {
+        "method": "constant_per_clip_grounding_z_translation",
+        "rotation_changed": False,
+    }
+    output["camera_alignment"].update(
+        validate_camera_motion_alignment(output, grounded_motion)
+    )
     output["grounded_motion_file"] = None
     return output
 
@@ -114,11 +187,7 @@ def main() -> None:
     torch.save(output, temporary)
     os.replace(temporary, args.output)
     print(f"Saved {args.output}")
-    for index, offset in enumerate(output["retarget_root_height_offsets_m"]):
-        print(
-            f"Motion {index}: preserved GT camera; bound reference root to "
-            f"grounded SOMA23 (motion Z correction {float(offset):.6f} m)"
-        )
+    print(output["camera_alignment"])
 
 
 if __name__ == "__main__":

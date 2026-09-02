@@ -49,13 +49,31 @@ def compute_discrete_latent_ppo_loss(
             prior_logits,
             p=top_p,
             temperature=temperature,
+            # The sampled token was in the rollout-time support. Retain it
+            # when a near-boundary top-p tie changes under PPO recomputation.
+            force_include=selected,
         )
     logprob = log_probs.gather(-1, selected.unsqueeze(-1)).squeeze(-1)
-    old_logprob = -old_neglogp
+    min_logprob = torch.log(
+        torch.tensor(torch.finfo(logits.dtype).tiny, device=logits.device)
+    )
+    logprob = torch.nan_to_num(
+        logprob,
+        nan=min_logprob.item(),
+        neginf=min_logprob.item(),
+        posinf=0.0,
+    )
+    old_logprob = torch.nan_to_num(
+        -old_neglogp,
+        nan=min_logprob.item(),
+        neginf=min_logprob.item(),
+        posinf=0.0,
+    )
 
     logprob_sum = logprob.sum(dim=-1)
     old_logprob_sum = old_logprob.sum(dim=-1)
-    ratio = torch.exp(logprob_sum - old_logprob_sum)
+    log_ratio = (logprob_sum - old_logprob_sum).clamp(min=-20.0, max=20.0)
+    ratio = torch.exp(log_ratio)
     unclipped = advantages * ratio
     clipped = advantages * torch.clamp(ratio, 1.0 - e_clip, 1.0 + e_clip)
     ppo_loss = -torch.min(unclipped, clipped).mean()

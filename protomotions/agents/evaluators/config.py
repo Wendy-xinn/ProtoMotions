@@ -28,6 +28,34 @@ class EvaluatorConfig:
     )
     policy_observation_intervention: str = "none"
     policy_observation_intervention_keys: List[str] = field(default_factory=list)
+    deterministic_policy: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Use greedy generation for policies exposing a "
+                "deterministic_generation switch during evaluation."
+            )
+        },
+    )
+    eval_token_switch_penalty: Optional[float] = field(
+        default=None,
+        metadata={
+            "help": "Greedy decoding bias added to each previous-frame token."
+        },
+    )
+    score_component: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Evaluation component mean used for checkpoint selection. "
+                "None preserves success-rate selection."
+            )
+        },
+    )
+    score_component_minimize: bool = field(
+        default=True,
+        metadata={"help": "Whether lower values of score_component are better."},
+    )
 
 
 @dataclass

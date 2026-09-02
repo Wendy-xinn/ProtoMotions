@@ -80,6 +80,21 @@ def create_parser():
         help="Evaluate fixed motions in smaller batches for stable PhysX comparisons.",
     )
     parser.add_argument(
+        "--eval-action-ema-alpha",
+        type=float,
+        default=None,
+        help=(
+            "Apply causal action EMA during physical evaluation: "
+            "applied=alpha*policy+(1-alpha)*previous."
+        ),
+    )
+    parser.add_argument(
+        "--eval-token-switch-penalty",
+        type=float,
+        default=None,
+        help="Bias previous-frame tokens during greedy physical evaluation.",
+    )
+    parser.add_argument(
         "--policy-observation-intervention",
         choices=("none", "zero", "shuffle"),
         default="none",
@@ -206,6 +221,15 @@ def create_parser():
         ),
     )
     parser.add_argument(
+        "--oracle-takeover-step",
+        type=int,
+        default=None,
+        help=(
+            "Run student tokens before this zero-based rollout step, then use "
+            "oracle target tokens for the remainder of each episode."
+        ),
+    )
+    parser.add_argument(
         "--deterministic-tokens",
         action="store_true",
         help=(
@@ -248,6 +272,38 @@ def create_parser():
             "During student rollout, save predicted tokens and frozen-encoder "
             "oracle tokens computed on the same current student state."
         ),
+    )
+    parser.add_argument(
+        "--recovery-push-steps",
+        type=int,
+        nargs="*",
+        default=[],
+        help=(
+            "Completed simulation steps after which to apply a deterministic "
+            "root-velocity impulse. Intended for finite oracle recovery tests."
+        ),
+    )
+    parser.add_argument(
+        "--recovery-push-linear-velocity",
+        type=float,
+        nargs=3,
+        metavar=("VX", "VY", "VZ"),
+        default=(0.0, 0.0, 0.0),
+        help="Root linear-velocity impulse in m/s for recovery diagnostics.",
+    )
+    parser.add_argument(
+        "--recovery-push-angular-velocity",
+        type=float,
+        nargs=3,
+        metavar=("WX", "WY", "WZ"),
+        default=(0.0, 0.0, 0.0),
+        help="Root angular-velocity impulse in rad/s for recovery diagnostics.",
+    )
+    parser.add_argument(
+        "--rollout-metrics-output",
+        type=str,
+        default=None,
+        help="Optional JSON output containing per-step simple-rollout metrics.",
     )
     parser.add_argument(
         "--offline-token-eval-output",
@@ -872,6 +928,20 @@ def main():
         agent.evaluator.config.fixed_motion_eval_batch_size = (
             args.fixed_motion_eval_batch_size
         )
+    if args.eval_action_ema_alpha is not None:
+        if not 0.0 < args.eval_action_ema_alpha <= 1.0:
+            raise ValueError("--eval-action-ema-alpha must be in (0, 1]")
+        agent.evaluator.config.eval_action_ema_alpha = args.eval_action_ema_alpha
+        log.info(
+            "Inference evaluator action EMA alpha: %.3f",
+            args.eval_action_ema_alpha,
+        )
+    if args.eval_token_switch_penalty is not None:
+        if args.eval_token_switch_penalty < 0.0:
+            raise ValueError("--eval-token-switch-penalty must be non-negative")
+        agent.evaluator.config.eval_token_switch_penalty = (
+            args.eval_token_switch_penalty
+        )
     if args.disable_scene_adapter:
         actor = getattr(agent.model, "_actor", None)
         scene_gate = getattr(actor, "scene_gate", None)
@@ -912,6 +982,24 @@ def main():
             )
         agent.evaluator.use_expert_rollout = True
         log.info("Inference override: using oracle target FSQ tokens")
+    if args.oracle_takeover_step is not None:
+        if args.oracle_target_tokens:
+            raise ValueError(
+                "--oracle-takeover-step cannot be combined with "
+                "--oracle-target-tokens"
+            )
+        if args.oracle_takeover_step < 0:
+            raise ValueError("--oracle-takeover-step must be non-negative")
+        if not hasattr(agent.model, "collect_expert_rollout"):
+            raise ValueError(
+                "--oracle-takeover-step requires collect_expert_rollout()."
+            )
+        agent.evaluator.oracle_takeover_step = args.oracle_takeover_step
+        log.info(
+            "Inference diagnostic: student rollout followed by oracle takeover "
+            "at step %d",
+            args.oracle_takeover_step,
+        )
     if args.record_target_tokens is not None:
         if not args.oracle_target_tokens:
             raise ValueError("--record-target-tokens requires --oracle-target-tokens")
@@ -931,6 +1019,28 @@ def main():
         agent.evaluator.student_oracle_token_record_path = (
             args.record_student_oracle_tokens
         )
+    if args.recovery_push_steps:
+        if args.record_steps <= 0 and not args.full_eval:
+            raise ValueError(
+                "--recovery-push-steps requires --record-steps > 0 or --full-eval"
+            )
+        if min(args.recovery_push_steps) <= 0:
+            raise ValueError("--recovery-push-steps values must be positive")
+        agent.evaluator.recovery_push_steps = set(args.recovery_push_steps)
+        agent.evaluator.recovery_push_linear_velocity = tuple(
+            args.recovery_push_linear_velocity
+        )
+        agent.evaluator.recovery_push_angular_velocity = tuple(
+            args.recovery_push_angular_velocity
+        )
+        log.info(
+            "Recovery diagnostic: push after steps %s with linear=%s m/s, "
+            "angular=%s rad/s",
+            sorted(agent.evaluator.recovery_push_steps),
+            agent.evaluator.recovery_push_linear_velocity,
+            agent.evaluator.recovery_push_angular_velocity,
+        )
+    agent.evaluator.rollout_metrics_output = args.rollout_metrics_output
     headless = getattr(env.simulator, "headless", True)
     ui = getattr(env.simulator, "user_interface", None)
     if not headless and ui is not None:

@@ -44,6 +44,8 @@ class _FakeDiscretePriorWithPEFT(nn.Module):
         self.init_warmup_obs = None
         self.generate_calls = []
         self.base_prior = kwargs["prior"]
+        self.sampling_mode = kwargs.get("sampling_mode", "nucleus")
+        self.reference_ready = False
         self.adapter = nn.Module()
         self.adapter.lora = nn.Linear(1, 1, bias=False)
         self.adapter.gamma = nn.Linear(1, 1)
@@ -64,7 +66,32 @@ class _FakeDiscretePriorWithPEFT(nn.Module):
         condition_key = self.kwargs.get("condition_key", "task_cond")
         return self._context(input_dict) + input_dict[condition_key]
 
-    def generate(self, prior_dict, return_logits=True, return_logprob=False):
+    def ensure_reference_modules(self):
+        pass
+
+    def capture_reference(self):
+        if self.reference_ready:
+            return False
+        self.reference_ready = True
+        return True
+
+    def reset_reference(self):
+        self.reference_ready = False
+
+    def require_reference(self):
+        if not self.reference_ready:
+            raise RuntimeError("missing reference")
+
+    def mark_reference_loaded(self):
+        self.reference_ready = True
+
+    def generate(
+        self,
+        prior_dict,
+        reference_input_dict=None,
+        return_logits=True,
+        return_logprob=False,
+    ):
         self.generate_calls.append((prior_dict, return_logits, return_logprob))
         context = self._context(prior_dict)
         indices = torch.tensor([[0, 1], [2, 0]], device=context.device)
@@ -443,6 +470,43 @@ def test_prior_peft_actor_handles_missing_encoder_and_preserves_frozen_train_mod
     assert actor.prior_with_peft.training is False
 
 
+def test_prior_peft_actor_reference_encoder_is_frozen_and_independent(monkeypatch):
+    actor = _actor(monkeypatch)
+    td = _td()
+
+    assert actor.capture_reference() is True
+    reference_before = actor.build_reference_prior_input(td.clone())["task_cond"]
+    student_before = actor.build_prior_input(td.clone())["task_cond"]
+    assert torch.equal(reference_before, student_before)
+    assert all(
+        not parameter.requires_grad
+        for parameter in actor.reference_actor_peft_model.parameters()
+    )
+
+    actor.actor_peft_model.scale.data.fill_(2.0)
+    reference_after = actor.build_reference_prior_input(td.clone())["task_cond"]
+    student_after = actor.build_prior_input(td.clone())["task_cond"]
+
+    assert torch.equal(reference_after, reference_before)
+    assert not torch.equal(student_after, student_before)
+
+
+def test_prior_peft_actor_trainable_parameters_exclude_complete_reference(monkeypatch):
+    actor = _actor(monkeypatch)
+    actor.capture_reference()
+
+    trainable = {
+        name for name, parameter in actor.named_parameters() if parameter.requires_grad
+    }
+
+    assert trainable
+    assert any(name.startswith("actor_peft_model.") for name in trainable)
+    assert any(".lora." in name for name in trainable)
+    assert not any(name.startswith("reference_actor_peft_model.") for name in trainable)
+    assert not any("reference_prior." in name for name in trainable)
+    assert not any(name.startswith("latent_decoder.") for name in trainable)
+
+
 def test_prior_peft_actor_registers_frozen_modules_once_under_canonical_paths(
     monkeypatch,
 ):
@@ -697,6 +761,7 @@ def test_prior_peft_actor_get_action_and_logp_writes_rollout_keys(monkeypatch):
 
 def test_prior_peft_actor_extracts_and_loads_adapter_only_state(monkeypatch):
     actor = _actor(monkeypatch)
+    actor.capture_reference()
 
     adapter_state = actor.adapter_state_dict()
 
@@ -710,6 +775,11 @@ def test_prior_peft_actor_extracts_and_loads_adapter_only_state(monkeypatch):
     assert not any("_anchor_transformer" in key for key in adapter_state)
     assert not any("reference_prior" in key for key in adapter_state)
     assert not any("reference_film_input_norm" in key for key in adapter_state)
+    assert not any("reference_actor_peft_model" in key for key in adapter_state)
+    assert any(
+        key.startswith("reference_actor_peft_model.")
+        for key in actor.state_dict()
+    )
 
     updated = {
         f"_actor.{key}": torch.full_like(value, 3.0)
