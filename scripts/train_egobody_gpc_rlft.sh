@@ -8,7 +8,7 @@ DATASET_ROOT="${EGOBODY_DATASET_ROOT:-$REPO_ROOT/data/motion_for_trackers/egobod
 PACK_ROOT="${EGOBODY_WINDOW_PACK:-$DATASET_ROOT/window_sft_orientation_v1}"
 SPLIT="${EGOBODY_SPLIT:-train}"
 MANIFEST="$PACK_ROOT/$SPLIT/manifest.json"
-SFT_CHECKPOINT="${GPC_RLFT_SFT_CHECKPOINT:-$REPO_ROOT/results/egobody_gpc_dagger_student50_h192_ls05_ema99_v1/best.ckpt}"
+SFT_CHECKPOINT="${GPC_RLFT_SFT_CHECKPOINT:-$REPO_ROOT/results/egobody_gpc_50clip_grounded_dagger_v2/best.ckpt}"
 NUM_ENVS="${GPC_RLFT_NUM_ENVS:-32}"
 ROLLOUT_HORIZON="${GPC_RLFT_ROLLOUT_HORIZON:-32}"
 WINDOW_SIZE="${GPC_RLFT_WINDOW_SIZE:-$ROLLOUT_HORIZON}"
@@ -49,6 +49,10 @@ ema_args=()
 if [[ -n "${GPC_RLFT_PARAMETER_EMA_DECAY:-}" ]]; then
     ema_args=(--rlft-parameter-ema-decay "$GPC_RLFT_PARAMETER_EMA_DECAY")
 fi
+oracle_token_args=()
+if [[ "${GPC_RLFT_ORACLE_TARGET_TOKENS:-0}" == "1" ]]; then
+    oracle_token_args=(--rlft-oracle-target-tokens)
+fi
 exec scripts/run_with_memory_guard.sh \
     scripts/run_wsl_isaaclab.sh \
     "$PYTHON_BIN" protomotions/train_agent.py \
@@ -68,9 +72,13 @@ exec scripts/run_with_memory_guard.sh \
     --num-mini-epochs "${GPC_RLFT_MINI_EPOCHS:-2}" \
     --rlft-action-smoothness-weight "${GPC_RLFT_ACTION_SMOOTHNESS_WEIGHT:--0.002}" \
     --rlft-action-acceleration-weight "${GPC_RLFT_ACTION_ACCELERATION_WEIGHT:--0.01}" \
+    --rlft-body-linear-jerk-weight "${GPC_RLFT_BODY_LINEAR_JERK_WEIGHT:-0.0}" \
     --rlft-tracking-threshold-bonus-weight "${GPC_RLFT_TRACKING_THRESHOLD_BONUS_WEIGHT:-0.25}" \
     --rlft-tracking-threshold-violation-weight "${GPC_RLFT_TRACKING_THRESHOLD_VIOLATION_WEIGHT:--0.25}" \
     --rlft-actor-lr "${GPC_RLFT_ACTOR_LR:-2e-6}" \
+    --rlft-action-residual-max-delta "${GPC_RLFT_ACTION_RESIDUAL_MAX_DELTA:-0.0}" \
+    --rlft-action-residual-logstd "${GPC_RLFT_ACTION_RESIDUAL_LOGSTD:--3.5}" \
+    "${oracle_token_args[@]}" \
     --rlft-base-prior-top-p "${GPC_RLFT_BASE_PRIOR_TOP_P:-0.99}" \
     --rlft-sft-kl-coeff "${GPC_RLFT_SFT_KL_COEFF:-0.01}" \
     --rlft-target-kl "${GPC_RLFT_TARGET_KL:-0.01}" \

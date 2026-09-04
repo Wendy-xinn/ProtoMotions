@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+DATASET_ROOT="${EGOBODY_DATASET_ROOT:-$REPO_ROOT/data/motion_for_trackers/egobody_smpl_ego_v1/sft_diverse_800_192}"
+
+# Relearn the scene-conditioned adapter against the corrected grounded camera
+# data. An initialization checkpoint is opt-in so stale pre-fix SFT weights are
+# never resumed accidentally.
+export EGOBODY_WINDOW_PACK="${EGOBODY_WINDOW_PACK:-$DATASET_ROOT/window_sft_orientation_v1_overfit50}"
+export GPC_RUN_NAME="${GPC_RUN_NAME:-egobody_gpc_50clip_grounded_dagger_v2}"
+export GPC_NUM_ENVS="${GPC_NUM_ENVS:-8}"
+export GPC_ROLLOUT_HORIZON="${GPC_ROLLOUT_HORIZON:-192}"
+export GPC_WINDOW_SIZE="${GPC_WINDOW_SIZE:-192}"
+export GPC_BATCH_SIZE="${GPC_BATCH_SIZE:-256}"
+export GPC_MAX_ITERATIONS="${GPC_MAX_ITERATIONS:-500}"
+export GPC_MINI_EPOCHS="${GPC_MINI_EPOCHS:-1}"
+
+export GPC_SFT_ROLLOUT_ACTOR="${GPC_SFT_ROLLOUT_ACTOR:-mixed}"
+export GPC_DAGGER_BETA_SCHEDULE="${GPC_DAGGER_BETA_SCHEDULE:-0.95 0.90 0.80 0.70}"
+export GPC_DAGGER_SUCCESS_THRESHOLDS="${GPC_DAGGER_SUCCESS_THRESHOLDS:-0.25 0.50 0.70}"
+export GPC_DAGGER_MAX_STUDENT_RUN="${GPC_DAGGER_MAX_STUDENT_RUN:-4}"
+export GPC_TOKEN_PERTURB_RATE="${GPC_TOKEN_PERTURB_RATE:-0.05}"
+export GPC_TOKEN_PERTURB_MODE="${GPC_TOKEN_PERTURB_MODE:-neighbor}"
+
+export GPC_SFT_ACTOR_LR="${GPC_SFT_ACTOR_LR:-1e-4}"
+export GPC_SFT_LABEL_SMOOTHING="${GPC_SFT_LABEL_SMOOTHING:-0.01}"
+export GPC_SFT_PARAMETER_EMA_DECAY="${GPC_SFT_PARAMETER_EMA_DECAY:-0.995}"
+export GPC_SEQUENCE_ACTION_LOSS_WEIGHT="${GPC_SEQUENCE_ACTION_LOSS_WEIGHT:-0.10}"
+export GPC_SEQUENCE_VELOCITY_LOSS_WEIGHT="${GPC_SEQUENCE_VELOCITY_LOSS_WEIGHT:-0.05}"
+export GPC_SEQUENCE_ACCELERATION_LOSS_WEIGHT="${GPC_SEQUENCE_ACCELERATION_LOSS_WEIGHT:-0.05}"
+export GPC_SEQUENCE_ACTION_LOSS_BETA="${GPC_SEQUENCE_ACTION_LOSS_BETA:-0.05}"
+
+export GPC_SAVE_EVERY="${GPC_SAVE_EVERY:-25}"
+export GPC_EVAL_EVERY="${GPC_EVAL_EVERY:-25}"
+export GPC_EVAL_BATCH_SIZE="${GPC_EVAL_BATCH_SIZE:-8}"
+export GPC_SFT_SCORE_COMPONENT="${GPC_SFT_SCORE_COMPONENT:-gr_error}"
+export GPC_TRACKING_ERROR_TERMINATION="${GPC_TRACKING_ERROR_TERMINATION:-0}"
+
+if [[ -n "${GPC_50_INIT_CHECKPOINT:-}" ]]; then
+    export GPC_CHECKPOINT="$GPC_50_INIT_CHECKPOINT"
+else
+    unset GPC_CHECKPOINT || true
+fi
+
+exec "$SCRIPT_DIR/train_egobody_gpc_window_sft.sh" "$@"
