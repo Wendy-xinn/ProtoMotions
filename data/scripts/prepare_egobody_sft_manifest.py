@@ -38,6 +38,11 @@ def parse_args() -> argparse.Namespace:
         help="Rebuild only these recordings while retaining the complete manifest.",
     )
     parser.add_argument(
+        "--smpl-only",
+        action="store_true",
+        help="Build native SMPL motion/camera/scene assets without SOMA23 retargeting.",
+    )
+    parser.add_argument(
         "--skip-usd",
         action="store_true",
         help="Defer OBJ-to-USD scene conversion until cache collection.",
@@ -146,7 +151,7 @@ def main() -> None:
                 env=env,
             )
 
-        if rebuild_recording or not soma_pack.is_file():
+        if not args.smpl_only and (rebuild_recording or not soma_pack.is_file()):
             run(
                 [
                     python,
@@ -162,7 +167,7 @@ def main() -> None:
                 env=env,
             )
 
-        if rebuild_recording or not grounded_pack.is_file():
+        if not args.smpl_only and (rebuild_recording or not grounded_pack.is_file()):
             run(
                 [
                     python,
@@ -175,7 +180,7 @@ def main() -> None:
                 env=env,
             )
 
-        if rebuild_recording or not grounded_camera.is_file():
+        if not args.smpl_only and (rebuild_recording or not grounded_camera.is_file()):
             run(
                 [
                     python,
@@ -206,6 +211,7 @@ def main() -> None:
 
     prepared = dict(manifest)
     prepared["prepared_root"] = str(output_root)
+    prepared["smpl_only"] = args.smpl_only
     prepared_path = manifest_path.parent / "prepared_manifest.json"
     prepared_path.write_text(json.dumps(prepared, indent=2), encoding="utf-8")
     print(f"Prepared manifest: {prepared_path}")

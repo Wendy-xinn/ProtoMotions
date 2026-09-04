@@ -176,3 +176,40 @@ def test_masked_mimic_interaction_loss_weights_positive_contacts():
     torch.testing.assert_close(loss, expected)
     assert metrics["scene_student/contact_positive_rate"] == 1.0
     assert metrics["scene_student/contact_recall"] == 0.0
+
+
+def test_privileged_latent_distillation_schedule_and_stop_gradient():
+    model = _masked_mimic_model_with_kld_schedule(None)
+    model.config.privileged_latent_loss_weight = 0.05
+    model.config.privileged_latent_loss_start_epoch = 500
+    model.config.privileged_latent_loss_end_epoch = 2000
+
+    assert model._privileged_latent_coefficient(499) == 0.0
+    assert model._privileged_latent_coefficient(500) == 0.0
+    assert model._privileged_latent_coefficient(1250) == 0.025
+    assert model._privileged_latent_coefficient(2000) == 0.05
+
+    prior_mu = torch.zeros(2, 2, requires_grad=True)
+    privileged_mu = torch.ones(2, 2, requires_grad=True)
+    tensordict = TensorDict(
+        {
+            "latent_mu": prior_mu,
+            "privileged_latent_mu": privileged_mu,
+        },
+        batch_size=2,
+    )
+    loss, logs = model._privileged_latent_distillation_loss(
+        tensordict,
+        current_epoch=2000,
+        zero_loss=prior_mu.sum() * 0.0,
+    )
+
+    torch.testing.assert_close(loss, torch.tensor(0.05))
+    torch.testing.assert_close(
+        logs["model/privileged_latent_distillation_coefficient"],
+        torch.tensor(0.05),
+    )
+    loss.backward()
+    assert prior_mu.grad is not None
+    assert torch.count_nonzero(prior_mu.grad) > 0
+    assert privileged_mu.grad is None

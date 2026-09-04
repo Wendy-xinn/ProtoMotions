@@ -97,27 +97,23 @@ def closest_points_on_object_surface(
         rotated_neutral_object_pointcloud + current_object_pos.unsqueeze(2)
     )
 
-    # Reshape tensors for broadcasting
-    # [envs, objects, points, 3] -> [envs, objects, 1, points, 3]
-    global_scene_pointcloud = global_scene_pointcloud.unsqueeze(2)
-    # [envs, contact_bodies, 3] -> [envs, 1, contact_bodies, 1, 3]
-    contact_bodies_pos = contact_bodies_pos.unsqueeze(1).unsqueeze(3)
+    # Chunk over scene points to avoid materializing the full
+    # [envs, objects, contact_bodies, points, 3] broadcast tensor.
+    contact = contact_bodies_pos.unsqueeze(1).unsqueeze(3)
+    best = torch.full((num_envs, num_objects, contact_bodies_pos.shape[1]), float("inf"), device=current_object_rot.device)
+    min_indices = torch.zeros((num_envs, num_objects, contact_bodies_pos.shape[1]), dtype=torch.long, device=current_object_rot.device)
+    point_chunk_size = 4096
+    for start in range(0, num_points, point_chunk_size):
+        end = min(start + point_chunk_size, num_points)
+        chunk = global_scene_pointcloud[:, :, start:end].unsqueeze(2)
+        chunk_dist, chunk_idx = torch.min(torch.norm(chunk - contact, dim=-1), dim=-1)
+        closer = chunk_dist < best
+        best = torch.where(closer, chunk_dist, best)
+        min_indices = torch.where(closer, chunk_idx + start, min_indices)
 
-    # Calculate distances between each contact body and all points in each object's pointcloud
-    # This will be [envs, objects, contact_bodies, points]
-    distances = torch.norm(global_scene_pointcloud - contact_bodies_pos, dim=-1)
-
-    # Find indices of minimum distances for each contact body and object
-    # [envs, objects, contact_bodies]
-    min_indices = torch.argmin(distances, dim=-1)
-
-    # Create index grid for proper gathering
     batch_idx = torch.arange(num_envs, device=current_object_rot.device)[:, None, None]
     obj_idx = torch.arange(num_objects, device=current_object_rot.device)[None, :, None]
-
-    # Get the nearest points: [envs, objects, contact_bodies, 3]
-    nearest_points = global_scene_pointcloud[batch_idx, obj_idx, 0, min_indices]
-
+    nearest_points = global_scene_pointcloud[batch_idx, obj_idx, min_indices]
     return nearest_points, min_indices
 
 

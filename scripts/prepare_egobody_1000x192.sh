@@ -9,6 +9,12 @@ BODY_TEXT_ROOT="${EGOBODY_BODY_TEXT_ROOT:-}"
 DATASET_ROOT="${EGOBODY_DATASET_ROOT:-$REPO_ROOT/data/motion_for_trackers/egobody_smpl_ego_v1/sft_1000_192}"
 MANIFEST="$DATASET_ROOT/manifest.json"
 PREPARED_MANIFEST="$DATASET_ROOT/prepared_manifest.json"
+SMPL_ONLY="${EGOBODY_SMPL_ONLY:-0}"
+PREPARE_ARGS=("$@")
+
+if [[ "$SMPL_ONLY" == "1" ]]; then
+    PREPARE_ARGS+=(--smpl-only)
+fi
 
 mkdir -p "$DATASET_ROOT"
 cd "$REPO_ROOT"
@@ -23,10 +29,10 @@ if [[ ! -f "$PREPARED_MANIFEST" ]]; then
     "$PYTHON_BIN" data/scripts/prepare_egobody_sft_manifest.py \
         "$MANIFEST" \
         --egobody-root "$EGOBODY_ROOT" \
-        "$@"
+        "${PREPARE_ARGS[@]}"
 fi
 
-if [[ ! -f "$DATASET_ROOT/online_packs_orientation_v1/manifest.json" ]]; then
+if [[ "$SMPL_ONLY" != "1" && ! -f "$DATASET_ROOT/online_packs_orientation_v1/manifest.json" ]]; then
     "$PYTHON_BIN" data/scripts/build_egobody_online_sft_packs.py \
         --manifest "$PREPARED_MANIFEST" \
         --output-root "$DATASET_ROOT/online_packs_orientation_v1"
@@ -41,4 +47,5 @@ if [[ ! -f "$DATASET_ROOT/online_packs_smpl_v1/manifest.json" ]]; then
 fi
 
 echo "Prepared shared EgoBody dataset: $DATASET_ROOT"
+echo "SMPL-only mode: $SMPL_ONLY"
 echo "Use EGOBODY_DATASET_ROOT=$DATASET_ROOT for both training baselines."

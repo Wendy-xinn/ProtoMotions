@@ -27,6 +27,7 @@ def compute_ego_visible_scene_pointcloud_obs(
     object_static_mask: Tensor,
     head_body_id: int,
     num_samples: int = 512,
+    map_point_budget: int = 8192,
     horizontal_fov_deg: float = 90.0,
     vertical_fov_deg: float = 60.0,
     near_m: float = 0.05,
@@ -72,6 +73,12 @@ def compute_ego_visible_scene_pointcloud_obs(
         return reference_body_pos.new_zeros((num_envs, num_samples * feature_dim))
 
     points_per_object = neutral_pointclouds.shape[2]
+    if map_point_budget > 0 and points_per_object > map_point_budget:
+        stride = (points_per_object + map_point_budget - 1) // map_point_budget
+        keep = torch.arange(0, points_per_object, stride, device=neutral_pointclouds.device)[:map_point_budget]
+        neutral_pointclouds = neutral_pointclouds.index_select(2, keep)
+        neutral_pointcloud_normals = neutral_pointcloud_normals.index_select(2, keep)
+        points_per_object = neutral_pointclouds.shape[2]
     expanded_object_rot = object_rot.unsqueeze(2).expand(
         -1, -1, points_per_object, -1
     )

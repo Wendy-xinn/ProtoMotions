@@ -302,7 +302,12 @@ def _camera_clip(
     }
 
 
-def _motion_diagnostics(motion, scene_mesh: trimesh.Trimesh, body_names: list[str]) -> dict:
+def _motion_diagnostics(
+    motion,
+    scene_mesh: trimesh.Trimesh,
+    body_names: list[str],
+    scene_z_translation: float,
+) -> dict:
     rng = np.random.default_rng(20260825)
     sample_count = min(200_000, max(20_000, len(scene_mesh.faces) // 2))
     # trimesh's sampler uses NumPy's global RNG; preserve reproducibility here.
@@ -313,6 +318,7 @@ def _motion_diagnostics(motion, scene_mesh: trimesh.Trimesh, body_names: list[st
     finally:
         np.random.set_state(state)
     surface_proto = np.einsum("ij,nj->ni", TRUMANS_Y_UP_TO_Z_UP, surface)
+    surface_proto[:, 2] += scene_z_translation
     tree = cKDTree(surface_proto)
     foot_names = [name for name in body_names if any(token in name.lower() for token in ("ankle", "foot", "toe"))]
     foot_ids = [body_names.index(name) for name in foot_names]
@@ -418,13 +424,29 @@ def main() -> None:
             kinematic_info=kinematic_info,
             device=torch.device("cpu"),
             dtype=torch.float32,
-            fix_height=False,
+            fix_height=True,
             compute_ground_contacts=True,
         )
+        ungrounded_root = torch.from_numpy(translations).to(
+            dtype=motion.rigid_body_pos.dtype
+        )
+        root_translation_delta = motion.rigid_body_pos[:, 0].cpu() - ungrounded_root
+        constant_delta = root_translation_delta[0].expand_as(root_translation_delta)
+        if not torch.allclose(
+            root_translation_delta, constant_delta, atol=1.0e-5, rtol=0.0
+        ) or not torch.allclose(
+            root_translation_delta[0, :2], torch.zeros(2), atol=1.0e-5
+        ):
+            raise ValueError(
+                "Official SMPL height fixing must be one constant Z translation"
+            )
+        grounding_z_offset = float(root_translation_delta[0, 2])
         if pv_stream is not None:
             camera_clip = _camera_clip(
                 pv_stream, frame_ids, proto_from_kinect, holo_to_kinect
             )
+            camera_clip["world_from_camera"][:, 2, 3] += grounding_z_offset
+            camera_clip["grounding_z_offset_m"] = grounding_z_offset
             camera_clip["reference_root"] = motion.rigid_body_pos[:, 0].cpu()
             camera_clips.append(camera_clip)
         clip_name = f"frame_{start:05d}_count_{len(frame_ids):04d}"
@@ -446,7 +468,12 @@ def main() -> None:
                 humanoid_motion_id=clip_index,
             )
         )
-        clip_diag = _motion_diagnostics(motion, scene_mesh, kinematic_info.body_names)
+        clip_diag = _motion_diagnostics(
+            motion,
+            scene_mesh,
+            kinematic_info.body_names,
+            -floor_height_scene_y,
+        )
         clip_diag.update(
             {
                 "name": clip_name,
@@ -455,6 +482,7 @@ def main() -> None:
                 "root_translation_semantics": "shaped_SMPL_joint_0",
                 "median_betas": np.median(beta_values, axis=0).tolist(),
                 "proto_from_kinect": proto_from_kinect.tolist(),
+                "grounding_z_offset_m": grounding_z_offset,
             }
         )
         diagnostics["clips"].append(clip_diag)

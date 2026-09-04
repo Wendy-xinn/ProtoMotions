@@ -22,9 +22,17 @@ renders/
 CLAUDE.local.md
 .cache/
 .wsl-vulkan/
+.runtime/
 /IsaacLab/
 output/
 results/
 data/motion_for_trackers/
 *.pt
 *.pkl
+isaacgym/*
+IsaacLab/*
+data/*
+examples/*
+docs/*
+data/static/
+*.pth

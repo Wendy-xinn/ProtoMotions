@@ -2,8 +2,6 @@
 
 import argparse
 
-import torch
-
 from examples.experiments.masked_mimic import transformer as base
 from protomotions.agents.common.config import (
     MLPLayerConfig,
@@ -29,7 +27,7 @@ def additional_experiment_arguments(parser: argparse.ArgumentParser):
     base.additional_experiment_arguments(parser)
     parser.add_argument("--scene-asset-root", required=True)
     parser.add_argument("--ego-camera-file", default=None)
-    parser.add_argument("--scene-pointcloud-candidates", type=int, default=2048)
+    parser.add_argument("--scene-pointcloud-candidates", type=int, default=4096)
     parser.add_argument("--scene-pointcloud-seed", type=int, default=0)
     parser.add_argument("--scene-contact-threshold-m", type=float, default=0.05)
     parser.add_argument(
@@ -49,6 +47,9 @@ def additional_experiment_arguments(parser: argparse.ArgumentParser):
         ),
     )
     parser.add_argument("--interaction-latent-loss-weight", type=float, default=0.1)
+    parser.add_argument("--privileged-latent-loss-weight", type=float, default=0.05)
+    parser.add_argument("--privileged-latent-loss-start-epoch", type=int, default=500)
+    parser.add_argument("--privileged-latent-loss-end-epoch", type=int, default=2000)
     parser.add_argument("--deployable-action-loss-weight", type=float, default=0.25)
     parser.add_argument("--deployable-rollout-start-epoch", type=int, default=500)
     parser.add_argument("--deployable-rollout-end-epoch", type=int, default=3000)
@@ -85,20 +86,21 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
         ego_visible_scene_pointcloud_obs_factory,
         future_scene_interaction_target_obs_factory,
     )
-    from protomotions.envs.context_views import EnvContext
     from protomotions.envs.control.masked_mimic_control import FixedBodyCondition
     from protomotions.envs.control.scene_object_reference_control import (
         SceneObjectReferenceControlConfig,
     )
-    from protomotions.envs.mdp_component import MdpComponent
-    from protomotions.envs.obs import (
-        compute_target_masks_only,
-        compute_target_poses_only,
-        compute_target_time_offsets,
-    )
-
     config = base.env_config(robot_cfg, args)
     control = config.control_components["masked_mimic"]
+    # base.env_config has already expanded this control to the external
+    # expert's horizon. Preserve that horizon explicitly on the copied expert
+    # observation before the student switches to its own sparse future steps.
+    expert_future_steps = control.future_steps
+    expert_target_obs = config.observation_components.get(
+        "expert_mimic_target_poses"
+    )
+    if expert_target_obs is not None:
+        expert_target_obs.static_params["future_steps"] = expert_future_steps
     control.future_steps = INTERACTION_FUTURE_STEPS
     control.fixed_conditioning = [FixedBodyCondition("Head", 1)]
     control.repeat_mask_probability = 1.0
@@ -107,13 +109,13 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
 
     body_ids = list(range(len(robot_cfg.kinematic_info.body_names)))
     head_id = robot_cfg.kinematic_info.body_names.index("Head")
-    head_tensor = torch.tensor([head_id], dtype=torch.long)
     observations = config.observation_components
     observations.update(
         {
             "ego_visible_scene_pointcloud": ego_visible_scene_pointcloud_obs_factory(
                 head_body_id=head_id,
                 num_samples=256,
+                map_point_budget=8192,
                 horizontal_fov_deg=90.0,
                 vertical_fov_deg=60.0,
                 near_m=0.05,
@@ -126,37 +128,6 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
             ),
             "body_contact_feedback": body_contact_feedback_obs_factory(
                 body_ids=body_ids
-            ),
-            "head_target_poses": MdpComponent(
-                compute_func=compute_target_poses_only,
-                dynamic_vars={
-                    "current_state_body_pos": EnvContext.current.rigid_body_pos,
-                    "current_state_body_rot": EnvContext.current.rigid_body_rot,
-                    "masked_mimic_ref_pos": EnvContext.masked_mimic.ref_pos,
-                    "masked_mimic_ref_rot": EnvContext.masked_mimic.ref_rot,
-                    "masked_mimic_target_bodies_masks": (
-                        EnvContext.masked_mimic.target_bodies_masks
-                    ),
-                },
-                static_params={
-                    "conditionable_body_ids": head_tensor,
-                    "include_root_relative": True,
-                },
-            ),
-            "head_target_masks": MdpComponent(
-                compute_func=compute_target_masks_only,
-                dynamic_vars={
-                    "masked_mimic_target_bodies_masks": (
-                        EnvContext.masked_mimic.target_bodies_masks
-                    )
-                },
-                static_params={"conditionable_body_ids": head_tensor},
-            ),
-            "head_target_times": MdpComponent(
-                compute_func=compute_target_time_offsets,
-                dynamic_vars={
-                    "masked_mimic_time_offsets": EnvContext.masked_mimic.time_offsets
-                },
             ),
             "future_scene_interactions": (
                 future_scene_interaction_target_obs_factory(
@@ -190,9 +161,9 @@ def agent_config(robot_config: RobotConfig, env_config: EnvConfig, args):
     prior = config.model.prior
     scene_keys = [
         "ego_visible_scene_pointcloud",
-        "head_target_poses",
-        "head_target_masks",
-        "head_target_times",
+        "masked_mimic_target_poses",
+        "masked_mimic_target_masks",
+        "masked_mimic_target_times",
         "body_contact_feedback",
     ]
     prior.in_keys = list(dict.fromkeys(prior.in_keys + scene_keys))
@@ -202,6 +173,9 @@ def agent_config(robot_config: RobotConfig, env_config: EnvConfig, args):
         out_keys=["student_scene_interaction_latent"],
         num_out=INTERACTION_LATENT_DIM,
         point_key="ego_visible_scene_pointcloud",
+        head_pose_key="masked_mimic_target_poses",
+        head_mask_key="masked_mimic_target_masks",
+        head_time_key="masked_mimic_target_times",
         point_feature_dim=10,
         condition_mode="full",
         use_scene_history_token=getattr(args, "scene_history_token", True),
@@ -256,6 +230,13 @@ def agent_config(robot_config: RobotConfig, env_config: EnvConfig, args):
     config.model.interaction_contact_positive_weight = (
         args.interaction_contact_positive_weight
     )
+    config.model.privileged_latent_loss_weight = args.privileged_latent_loss_weight
+    config.model.privileged_latent_loss_start_epoch = (
+        args.privileged_latent_loss_start_epoch
+    )
+    config.model.privileged_latent_loss_end_epoch = (
+        args.privileged_latent_loss_end_epoch
+    )
 
     config.evaluator.policy_observation_intervention_keys = [
         "ego_visible_scene_pointcloud"
@@ -294,7 +275,9 @@ def agent_config(robot_config: RobotConfig, env_config: EnvConfig, args):
 def configure_robot_and_simulator(
     robot_cfg: RobotConfig, simulator_cfg: SimulatorConfig, args: argparse.Namespace
 ):
-    base.configure_robot_and_simulator(robot_cfg, simulator_cfg, args)
+    del args
+    simulator_cfg.default_robot_friction = 0.5
+    robot_cfg.update_fields(contact_bodies=list(robot_cfg.kinematic_info.body_names))
 
 
 def apply_inference_overrides(
@@ -302,9 +285,19 @@ def apply_inference_overrides(
     simulator_cfg: SimulatorConfig,
     env_cfg,
     agent_cfg,
+    terrain_cfg,
+    motion_lib_cfg,
+    scene_lib_cfg,
     args: argparse.Namespace,
 ):
     base.apply_inference_overrides(
-        robot_cfg, simulator_cfg, env_cfg, agent_cfg, args
+        robot_cfg,
+        simulator_cfg,
+        env_cfg,
+        agent_cfg,
+        terrain_cfg,
+        motion_lib_cfg,
+        scene_lib_cfg,
+        args,
     )
     agent_cfg.expert_model_path = None

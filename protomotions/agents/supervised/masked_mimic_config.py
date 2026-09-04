@@ -107,6 +107,9 @@ class MaskedMimicModelConfig(BaseModelConfig):
     interaction_contact_loss_weight: float = 0.0
     interaction_contact_focal_gamma: float = 2.0
     interaction_contact_positive_weight: float = 1.0
+    privileged_latent_loss_weight: float = 0.0
+    privileged_latent_loss_start_epoch: int = 0
+    privileged_latent_loss_end_epoch: int = 0
 
 
 @dataclass

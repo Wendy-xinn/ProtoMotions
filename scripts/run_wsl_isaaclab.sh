@@ -7,9 +7,15 @@ INSTALL_ROOT="${WSL_VULKAN_ROOT:-$REPO_ROOT/.wsl-vulkan/mesa-25.0.7}"
 EXTRACT_ROOT="$INSTALL_ROOT/root"
 ICD_PATH="$INSTALL_ROOT/dzn_icd.json"
 DRIVER_DIR="$EXTRACT_ROOT/usr/lib/x86_64-linux-gnu"
+NATIVE_RUNTIME_LIB_DIR="${ISAAC_RUNTIME_LIB_DIR:-$REPO_ROOT/.runtime/isaac-system-libs/lib}"
 
 # Native Linux training nodes do not need the WSLg Mesa compatibility layer.
 if ! grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null; then
+    if [[ -d "$NATIVE_RUNTIME_LIB_DIR" ]]; then
+        export LD_LIBRARY_PATH="$NATIVE_RUNTIME_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    fi
+    export PROTOMOTIONS_MJCF_USD_CACHE_DIR="${PROTOMOTIONS_MJCF_USD_CACHE_DIR:-${TMPDIR:-/tmp}/protomotions-${USER:-user}/isaaclab_mjcf_usd}"
+    mkdir -p "$PROTOMOTIONS_MJCF_USD_CACHE_DIR"
     exec "$@"
 fi
 

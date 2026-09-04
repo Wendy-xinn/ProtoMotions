@@ -434,6 +434,7 @@ def main():
         help="Meters to keep around the motion when cropping a large terrain",
     )
     parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument(
         "--show-ego-visibility",
         action="store_true",
@@ -452,6 +453,13 @@ def main():
     parser.add_argument(
         "--ego-camera-pt",
         help="Measured per-motion camera trajectories in Proto world coordinates.",
+    )
+    parser.add_argument(
+        "--compare-ego-camera-pt",
+        help=(
+            "Optional second measured camera pack shown as a comparison frustum. "
+            "It does not drive ego-scene visibility."
+        ),
     )
     parser.add_argument(
         "--ego-visibility-stride",
@@ -518,7 +526,7 @@ def main():
             except Exception as e:
                 print(f"Warning: failed to load {mesh_path}: {e}")
 
-    server = viser.ViserServer(port=args.port)
+    server = viser.ViserServer(host=args.host, port=args.port)
     print(f"Viser running at http://localhost:{args.port}")
 
     # Motion recordings may live tens of metres from the world origin (for
@@ -570,15 +578,11 @@ def main():
             "Not seen yet", initial_value=False
         )
         show_ego_frustum = server.gui.add_checkbox(
-            "Measured GT/input camera", initial_value=args.show_ego_visibility
+            "Corrected measured camera", initial_value=args.show_ego_visibility
         )
-        show_student_head_frustum = server.gui.add_checkbox(
-            # Keep report views uncluttered by default. These diagnostic
-            # frusta can still be enabled explicitly from the Viser panel.
-            "Student head camera", initial_value=False
-        )
-        show_compare_head_frustum = server.gui.add_checkbox(
-            "GT-body head camera", initial_value=False
+        show_compare_ego_frustum = server.gui.add_checkbox(
+            "Original measured camera",
+            initial_value=args.compare_ego_camera_pt is not None,
         )
         ego_current_count = server.gui.add_text(
             "Visible points", initial_value="0", disabled=True
@@ -692,6 +696,19 @@ def main():
             )
         print(f"Loaded measured ego cameras: {args.ego_camera_pt}")
 
+    compare_ego_cameras = None
+    if args.compare_ego_camera_pt:
+        compare_ego_camera_data = torch.load(
+            args.compare_ego_camera_pt, weights_only=False, map_location="cpu"
+        )
+        compare_ego_cameras = compare_ego_camera_data["motions"]
+        if len(compare_ego_cameras) != len(motions):
+            raise ValueError(
+                f"Comparison camera pack has {len(compare_ego_cameras)} motions, "
+                f"expected {len(motions)}"
+            )
+        print(f"Loaded comparison ego cameras: {args.compare_ego_camera_pt}")
+
     recorded_objects = None
     objects_path = Path(args.objects) if args.objects else None
     if (
@@ -740,28 +757,18 @@ def main():
         # This is an orientation icon, not a metric drawing of the 6m far plane.
         scale=0.18,
         color=(255, 220, 40),
-        thickness=2.0,
         visible=args.show_ego_visibility,
     )
-    student_head_frustum_handle = server.scene.add_camera_frustum(
-        "/ego/student_head_camera_frustum",
+    compare_ego_frustum_handle = server.scene.add_camera_frustum(
+        "/ego/original_camera_frustum",
         fov=np.deg2rad(args.ego_vertical_fov),
-        aspect=np.tan(np.deg2rad(args.ego_horizontal_fov) * 0.5)
-        / np.tan(np.deg2rad(args.ego_vertical_fov) * 0.5),
-        scale=0.15,
-        color=(40, 210, 255),
-        thickness=2.0,
-        visible=False,
-    )
-    compare_head_frustum_handle = server.scene.add_camera_frustum(
-        "/ego/gt_body_head_camera_frustum",
-        fov=np.deg2rad(args.ego_vertical_fov),
-        aspect=np.tan(np.deg2rad(args.ego_horizontal_fov) * 0.5)
-        / np.tan(np.deg2rad(args.ego_vertical_fov) * 0.5),
-        scale=0.15,
-        color=(255, 70, 210),
-        thickness=2.0,
-        visible=False,
+        aspect=(
+            np.tan(np.deg2rad(args.ego_horizontal_fov) * 0.5)
+            / np.tan(np.deg2rad(args.ego_vertical_fov) * 0.5)
+        ),
+        scale=0.18,
+        color=(255, 80, 40),
+        visible=args.compare_ego_camera_pt is not None,
     )
 
     def _clear_scene():
@@ -1007,56 +1014,26 @@ def main():
         transform[:3, :3] = world_from_camera
         return camera_pos, tf.quaternion_from_matrix(transform)
 
-    def _head_camera_pose(motion, skeleton, frame_index, x_offset=0.0):
-        head_id = skeleton["bodies"].index("Head")
-        head_pos = np.asarray(
-            motion["gts"][frame_index, head_id], dtype=np.float64
-        ).copy()
-        head_pos[0] += x_offset
-        head_q = np.asarray(
-            motion["grs"][frame_index, head_id], dtype=np.float64
-        )
-        head_rot = tf.quaternion_matrix(quat_xyzw_to_wxyz(head_q))[:3, :3]
-        camera_pos = head_pos + head_rot @ np.array([0.0, -0.08, 0.03])
-        camera_rot = head_rot @ tf.rotation_matrix(
-            np.pi * 0.5, [1.0, 0.0, 0.0]
-        )[:3, :3]
-        return _frustum_pose(
-            (
-                camera_pos,
-                camera_rot,
-                np.tan(np.deg2rad(args.ego_horizontal_fov) * 0.5),
-                np.tan(np.deg2rad(args.ego_vertical_fov) * 0.5),
-            )
-        )
 
-    def update_head_camera_frusta(mi: int, frame_index: int):
-        student_head_frustum_handle.visible = show_student_head_frustum.value
-        student_pos, student_wxyz = _head_camera_pose(
-            motions[mi], skel, frame_index
+    def update_compare_ego_camera_frustum(mi: int, frame_index: int):
+        visible = (
+            compare_ego_cameras is not None and show_compare_ego_frustum.value
         )
-        student_head_frustum_handle.position = student_pos
-        student_head_frustum_handle.wxyz = student_wxyz
-
-        compare_visible = cmp_motions is not None and show_compare_head_frustum.value
-        compare_head_frustum_handle.visible = compare_visible
-        if compare_visible:
-            cmp_mi = min(mi, len(cmp_motions) - 1)
-            cmp_fi = min(frame_index, cmp_motions[cmp_mi]["gts"].shape[0] - 1)
-            compare_offset = float(args.offset)
-            if args.align_compare_root:
-                primary_root0 = motions[mi]["gts"][0, 0]
-                compare_root0 = cmp_motions[cmp_mi]["gts"][0, 0]
-                # Head-camera helper only accepts the displayed X offset; root
-                # alignment in Y/Z is applied explicitly below.
-                alignment = primary_root0 - compare_root0
-            else:
-                alignment = np.zeros(3, dtype=np.float64)
-            compare_pos, compare_wxyz = _head_camera_pose(
-                cmp_motions[cmp_mi], cmp_skel, cmp_fi, compare_offset
-            )
-            compare_head_frustum_handle.position = compare_pos + alignment
-            compare_head_frustum_handle.wxyz = compare_wxyz
+        compare_ego_frustum_handle.visible = visible
+        if not visible:
+            return
+        camera_info = compare_ego_cameras[mi]
+        pose_index = min(frame_index, len(camera_info["world_from_camera"]) - 1)
+        world_from_camera = np.asarray(
+            camera_info["world_from_camera"][pose_index], dtype=np.float64
+        )
+        # EgoBody PV poses are OpenGL cameras (-Z forward); Viser frusta use +Z.
+        frustum_rot = world_from_camera[:3, :3] @ np.diag([1.0, -1.0, -1.0])
+        compare_pos, compare_wxyz = _frustum_pose(
+            (world_from_camera[:3, 3], frustum_rot, 0.0, 0.0)
+        )
+        compare_ego_frustum_handle.position = compare_pos
+        compare_ego_frustum_handle.wxyz = compare_wxyz
 
     def update_ego_visibility(mi: int, frame_index: int):
         state = ego_visibility_state
@@ -1265,7 +1242,7 @@ def main():
         update_scene_frame(fi)
         if packaged_scenes is not None:
             update_ego_visibility(mi, fi)
-        update_head_camera_frusta(mi, fi)
+        update_compare_ego_camera_frustum(mi, fi)
 
         gts = motion["gts"][fi]
         grs = motion["grs"][fi]

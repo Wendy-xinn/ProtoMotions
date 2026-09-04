@@ -72,7 +72,12 @@ def default_usd_cache_dir(mjcf_path: str, options: Mapping[str, Any]) -> str:
         ).encode("utf-8")
     ).hexdigest()[:16]
     stem = Path(abs_mjcf).stem
-    cache_root = Path("~/.cache/protomotions/isaaclab_mjcf_usd").expanduser()
+    cache_root = Path(
+        os.environ.get(
+            "PROTOMOTIONS_MJCF_USD_CACHE_DIR",
+            "~/.cache/protomotions/isaaclab_mjcf_usd",
+        )
+    ).expanduser()
     return _absolute_path(cache_root / f"{stem}_{digest}")
 
 

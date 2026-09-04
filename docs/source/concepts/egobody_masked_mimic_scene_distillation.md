@@ -41,8 +41,13 @@ EGOBODY_SCENE_BACKEND=isaaclab \
 1. Evaluate the standard SMPL full-body, scene-free (`body_only`) reference tracker on the 650
    training clips and held-out splits; fine-tune it on the training split only if
    full-clip tracking coverage is insufficient.
-2. Distill the ego student from causal visible-scene memory and sparse head
-   trajectory targets. The default teacher supplies online action labels. A 0.25-weight direct loss also supervises the deployable action, while the original privileged-action loss and posterior/prior KL are retained.
+2. Distill the student from causal visible-scene memory and masked sparse-body
+   trajectory targets. EgoBody fixes the visible mask to Head; future third-person
+   data may expose any subset without changing the network. The default teacher
+   supplies online action labels. A 0.25-weight direct loss supervises the
+   deployable action, and a scheduled 0.05-weight stop-gradient MSE aligns the
+   fused student prior mean with the privileged full-motion posterior mean,
+   alongside the original privileged-action loss and posterior/prior KL.
 3. Evaluate scene use on the same checkpoint with matched, zeroed, and shuffled
    scene memory.
 
@@ -54,7 +59,7 @@ encoder directly. Distilling interaction features from a separately trained
 baseline.
 
 Future GT interactions are loss targets only. The student inference path receives
-the accumulated static surfaces observed by the ego camera, ordered head targets,
+the accumulated static surfaces observed by the ego camera, masked sparse-body targets (Head-only for the current EgoBody split),
 current body state, previous actions, and current contact feedback. It does not
 receive future full-body queries, GT contacts, or complete unseen geometry.
 
@@ -84,12 +89,13 @@ MM_STUDENT_ITERATIONS=5000 \
 scripts/train_egobody_masked_mimic_scene_student.sh
 ```
 
-Rollout collection transitions linearly from the privileged posterior action to the deployable prior action between epochs 500 and 3000. The teacher is queried online on the visited states, which reduces closed-loop covariate shift. The deployable prior receives one GPC-style interaction token. An ordered head
-trajectory queries the accumulated causal scene point memory with cross-attention;
+Rollout collection transitions linearly from the privileged posterior action to the deployable prior action between epochs 500 and 3000. The teacher is queried online on the visited states, which reduces closed-loop covariate shift. The deployable prior receives one GPC-style interaction token. An ordered masked-body trajectory
+queries the accumulated causal scene point memory with cross-attention;
 a learned history-summary token preserves global coverage/count/age statistics.
 The token joins current-state, sparse future-target, and body-history tokens in
-the MaskedMimic prior Transformer. The privileged encoder never receives scene
-input.
+the MaskedMimic prior Transformer. The privileged encoder never receives scene input. The student prior receives
+both the ordinary masked-target token and the scene-interaction token, so scene
+geometry remains auxiliary rather than replacing the visible trajectory.
 
 To reproduce the optional scene-aware-teacher ablation, set
 `MM_DISTILL_EXPERT_INTERACTIONS=1` and provide its checkpoint through

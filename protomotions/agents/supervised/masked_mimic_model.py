@@ -300,6 +300,44 @@ class MaskedMimicModel(BaseModel):
             + progress * (schedule.end_kld_coeff - schedule.init_kld_coeff)
         )
 
+    def _privileged_latent_coefficient(self, current_epoch: int) -> float:
+        weight = getattr(self.config, "privileged_latent_loss_weight", 0.0)
+        start = getattr(self.config, "privileged_latent_loss_start_epoch", 0)
+        end = getattr(self.config, "privileged_latent_loss_end_epoch", start)
+        if current_epoch < start:
+            return 0.0
+        if end <= start:
+            return weight
+        progress = min(max((current_epoch - start) / (end - start), 0.0), 1.0)
+        return weight * progress
+
+    def _privileged_latent_distillation_loss(
+        self,
+        tensordict: Optional[TensorDict],
+        current_epoch: int,
+        zero_loss: torch.Tensor,
+    ) -> Tuple[torch.Tensor, Dict]:
+        coefficient = self._privileged_latent_coefficient(current_epoch)
+        if tensordict is None or coefficient == 0.0:
+            latent_loss = zero_loss * 0.0
+        else:
+            # The deployable prior fuses all currently visible body conditions
+            # (Head-only for EgoBody), the causal scene token, history, and
+            # proprioception. Distill that joint representation toward the
+            # full-motion posterior mean. The detached target prevents this
+            # auxiliary objective from collapsing the privileged encoder.
+            latent_loss = F.mse_loss(
+                tensordict[LATENT_MU_KEY],
+                tensordict[PRIVILEGED_LATENT_MU_KEY].detach(),
+            ) * coefficient
+        return latent_loss, {
+            "model/privileged_latent_distillation_loss": latent_loss.detach(),
+            "model/privileged_latent_distillation_coefficient": torch.tensor(
+                coefficient,
+                device=zero_loss.device,
+            ),
+        }
+
     def compute_model_loss(
         self,
         tensordict: Optional[TensorDict],
@@ -318,6 +356,13 @@ class MaskedMimicModel(BaseModel):
         )
         loss = loss + interaction_loss
         log_dict.update(interaction_log_dict)
+        latent_distillation_loss, latent_distillation_log = (
+            self._privileged_latent_distillation_loss(
+                tensordict, current_epoch, zero_loss
+            )
+        )
+        loss = loss + latent_distillation_loss
+        log_dict.update(latent_distillation_log)
         if getattr(self.config.vae, "kld_schedule", None) is None:
             return loss, log_dict
 

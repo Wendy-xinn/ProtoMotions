@@ -409,6 +409,7 @@ def load_ego_camera_trajectory_params(
 def ego_visible_scene_pointcloud_obs_factory(
     head_body_id: int,
     num_samples: int = 512,
+    map_point_budget: int = 8192,
     horizontal_fov_deg: float = 90.0,
     vertical_fov_deg: float = 60.0,
     near_m: float = 0.05,
@@ -437,6 +438,7 @@ def ego_visible_scene_pointcloud_obs_factory(
     static_params = {
         "head_body_id": head_body_id,
         "num_samples": num_samples,
+        "map_point_budget": map_point_budget,
         "horizontal_fov_deg": horizontal_fov_deg,
         "vertical_fov_deg": vertical_fov_deg,
         "near_m": near_m,
