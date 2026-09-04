@@ -28,6 +28,7 @@ from protomotions.agents.peft import actor as actor_module
 from protomotions.agents.peft.prior_config import (
     DiscretePriorPEFTConfig,
     DiscretePriorPEFTActorConfig,
+    GaussianActionResidualConfig,
 )
 from protomotions.agents.peft.actor import DiscretePriorPEFTActor
 from protomotions.agents.peft.model import DiscretePriorPEFTModel
@@ -757,6 +758,43 @@ def test_prior_peft_actor_get_action_and_logp_writes_rollout_keys(monkeypatch):
     assert torch.equal(out[LATENT_KEY], torch.tensor([[0, 1], [2, 0]]))
     assert torch.allclose(out[LATENT_LOGPROB_KEY], expected_logprob)
     assert torch.allclose(out["neglogp"], -expected_logprob)
+
+
+def test_prior_peft_actor_samples_zero_mean_initialized_action_residual(monkeypatch):
+    _FakeDiscretePriorWithPEFT.instances.clear()
+    monkeypatch.setattr(actor_module, "DiscretePriorWithPEFT", _FakeDiscretePriorWithPEFT)
+    actor = DiscretePriorPEFTActor(
+        config=DiscretePriorPEFTActorConfig(
+            in_keys=["task_obs"],
+            peft=DiscretePriorPEFTConfig(
+                model=_actor_peft_model_config(in_keys=["task_obs"]),
+                rank=2,
+                alpha=4.0,
+            ),
+            action_residual=GaussianActionResidualConfig(
+                enabled=True,
+                action_dim=1,
+                hidden_dim=8,
+                max_delta=0.12,
+            ),
+        ),
+        pretrained_prior_model=_PriorModel(),
+        mimic_target_poses_dim=2,
+    )
+    actor.eval()
+    torch.manual_seed(0)
+
+    out = actor.get_action_and_logp(_td())
+
+    assert not torch.equal(out["action_residual"], torch.zeros(2, 1))
+    assert torch.allclose(out["action"], out["mean_action"] + out["action_residual"])
+    assert torch.equal(out["mean_action"], torch.tensor([[-3.0], [-2.0]]))
+    assert torch.equal(out["mean_action_residual"], torch.zeros(2, 1))
+    assert "action_residual" in actor.out_keys
+    assert actor.action_residual_logstd.requires_grad
+    adapter_state = actor.adapter_state_dict()
+    assert "action_residual_logstd" in adapter_state
+    assert any(key.startswith("action_residual_model.") for key in adapter_state)
 
 
 def test_prior_peft_actor_extracts_and_loads_adapter_only_state(monkeypatch):

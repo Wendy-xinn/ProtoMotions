@@ -83,6 +83,10 @@ class BaseEvaluator:
         self._recorded_student_tokens: list[Tensor] = []
         self._recorded_student_state_oracle_tokens: list[Tensor] = []
         self._recorded_student_observations: dict[str, list[Tensor]] = {}
+        self.action_record_path: Optional[str] = None
+        self.oracle_state_feedback = False
+        self._recorded_policy_actions: list[Tensor] = []
+        self._recorded_processed_actions: list[Tensor] = []
 
         self.metric_plugins = []
         self._register_plugins()
@@ -864,6 +868,8 @@ class BaseEvaluator:
         self._recorded_student_tokens = []
         self._recorded_student_state_oracle_tokens = []
         self._recorded_student_observations = {}
+        self._recorded_policy_actions = []
+        self._recorded_processed_actions = []
         done_indices = None
         step = 0
 
@@ -886,14 +892,44 @@ class BaseEvaluator:
         try:
             while True:
                 obs, _ = self.env.reset(done_indices)
+                if self.oracle_state_feedback:
+                    env_ids = torch.arange(self.env.num_envs, device=self.device)
+                    motion_ids = self.env.motion_manager.motion_ids
+                    motion_times = self.env.motion_manager.motion_times
+                    states, object_states = self.env.compute_ref_reset_state(
+                        env_ids,
+                        motion_ids,
+                        motion_times,
+                        sample_flat=False,
+                    )
+                    self.env.simulator.reset_envs(states, object_states, env_ids)
+                    self.env._current_context = None
+                    self.env._current_noisy_obs = None
+                    if self.env.state_history is not None:
+                        self.env._reset_state_history(
+                            env_ids,
+                            torch.zeros_like(env_ids, dtype=torch.bool),
+                            env_ids,
+                            motion_ids,
+                            motion_times,
+                        )
+                    obs = self.env.get_obs()
                 self.agent.pre_collect_step(step)
                 obs = self.agent.add_agent_info_to_obs(obs)
                 obs_td = self.agent.obs_dict_to_tensordict(obs)
 
                 self._current_rollout_step = step
                 action = self._policy_action(obs_td)
+                if self.action_record_path is not None:
+                    self._recorded_policy_actions.append(
+                        action[0].detach().cpu().clone()
+                    )
 
                 _, _, dones, _, extras = self.env.step(action)
+                if self.action_record_path is not None:
+                    self._recorded_processed_actions.append(
+                        self.env._current_processed_action[0].detach().cpu().clone()
+                    )
 
                 # Accumulate metrics
                 if collect_metrics and "eval_values" in extras:
@@ -1007,6 +1043,22 @@ class BaseEvaluator:
                     output_path,
                 )
                 print(f"Student/oracle token comparison saved to {output_path}")
+            if self.action_record_path is not None:
+                output_path = Path(self.action_record_path)
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                if not self._recorded_policy_actions:
+                    raise RuntimeError("No policy actions were recorded.")
+                torch.save(
+                    {
+                        "policy_action": torch.stack(self._recorded_policy_actions),
+                        "processed_action": torch.stack(
+                            self._recorded_processed_actions
+                        ),
+                        "num_steps": len(self._recorded_policy_actions),
+                    },
+                    output_path,
+                )
+                print(f"Policy and processed actions saved to {output_path}")
             if recording_started and getattr(simulator, "_user_is_recording", False):
                 # ``render`` consumes the state-change flag and writes motion
                 # sidecars, plus an MP4 when a viewport is available.

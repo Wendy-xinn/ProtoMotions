@@ -354,6 +354,14 @@ def test_reward_factories_and_bundles_bind_expected_context_paths():
     )
     assert _params(acceleration)["weight"] == -0.25
 
+    body_jerk = factories.body_linear_jerk_factory(weight=-0.125)
+    assert _bindings(body_jerk)["current_body_vel"] == "current.rigid_body_vel"
+    assert (
+        _bindings(body_jerk)["historical_body_vel"]
+        == "historical.rigid_body_vel"
+    )
+    assert _params(body_jerk)["weight"] == -0.125
+
     threshold_bonus = factories.tracking_threshold_bonus_factory(weight=0.3)
     assert _bindings(threshold_bonus)["current_rigid_body_pos"] == "current.rigid_body_pos"
     assert _bindings(threshold_bonus)["ref_rigid_body_rot"] == "mimic.ref_state.rigid_body_rot"

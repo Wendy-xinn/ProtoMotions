@@ -103,6 +103,7 @@ class _Env:
         self.respawn_root_offset = torch.zeros(num_envs, 3)
         self.reset_calls = []
         self.step_actions = []
+        self._current_processed_action = torch.zeros(num_envs, 2)
 
     def save_state(self):
         return self.saved_state
@@ -116,6 +117,7 @@ class _Env:
 
     def step(self, actions):
         self.step_actions.append(actions.clone())
+        self._current_processed_action = actions + 0.25
         extras = {
             "raw/dof_pos": torch.arange(self.num_envs * 2, dtype=torch.float).view(
                 self.num_envs, 2
@@ -431,6 +433,19 @@ def test_mimic_evaluate_episode_applies_action_ema_and_records_actions(tmp_path)
     assert torch.equal(evaluator._metrics["actions"].data[0, 1], torch.full((2,), 1.5))
 
 
+def test_simple_test_policy_can_record_policy_and_processed_actions(tmp_path):
+    evaluator = _evaluator(tmp_path)
+    output_path = tmp_path / "actions.pt"
+    evaluator.action_record_path = str(output_path)
+
+    evaluator.simple_test_policy(max_steps=2)
+
+    recorded = torch.load(output_path, weights_only=True)
+    assert recorded["num_steps"] == 2
+    assert torch.equal(recorded["policy_action"], torch.ones(2, 2))
+    assert torch.equal(recorded["processed_action"], torch.full((2, 2), 1.25))
+
+
 def test_mimic_evaluate_episode_parks_failed_envs_and_stops_batch(tmp_path):
     evaluator = _evaluator(tmp_path)
     evaluator._episode_ctx = MimicEpisodeContext(
@@ -451,6 +466,26 @@ def test_mimic_evaluate_episode_parks_failed_envs_and_stops_batch(tmp_path):
 
     assert len(evaluator.env.step_actions) == 1
     assert torch.equal(parked[-1], torch.tensor([0, 1]))
+
+
+def test_mimic_evaluate_episode_can_continue_after_metric_failure(tmp_path):
+    evaluator = _evaluator(tmp_path, deactivate_failed_motions=False)
+    evaluator._episode_ctx = MimicEpisodeContext(
+        motion_ids=torch.tensor([0, 1]),
+        frame_limits=torch.tensor([3, 3]),
+    )
+    evaluator._metrics = {"actions": _metric(num_motions=2, features=2)}
+    evaluator._motion_failed = torch.zeros(3, dtype=torch.bool)
+
+    def fail_active(active_env_ids, active_motion_ids):
+        evaluator._motion_failed[active_motion_ids] = True
+
+    evaluator._check_evaluation_failures = fail_active
+
+    evaluator.evaluate_episode(torch.tensor([0, 1]), max_steps=3)
+
+    assert len(evaluator.env.step_actions) == 3
+    assert evaluator.env.simulator.parked == []
 
 
 def test_mimic_evaluate_episode_counts_early_termination_as_failure(tmp_path):

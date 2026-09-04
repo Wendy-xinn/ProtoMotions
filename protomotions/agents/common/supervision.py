@@ -96,14 +96,17 @@ def compute_supervision_loss(batch, config: SupervisionLossConfig):
             label_smoothing=config.label_smoothing,
         )
         with torch.no_grad():
-            accuracy = (
-                logits.argmax(dim=-1).reshape(-1) == target.reshape(-1)
-            ).float().mean()
+            correct = logits.argmax(dim=-1) == target
+            accuracy = correct.reshape(-1).float().mean()
         metrics = {
             f"{prefix}/cross_entropy": raw_loss.detach(),
             f"{prefix}/accuracy": accuracy,
             f"{prefix}/perplexity": torch.exp(raw_loss.detach()),
         }
+        if correct.ndim > 1:
+            metrics[f"{prefix}/all_positions_accuracy"] = (
+                correct.reshape(correct.shape[0], -1).all(dim=-1).float().mean()
+            )
     elif loss_type == SupervisionLossType.DISCRETE_KL:
         raw_loss = _discrete_kl(
             _get(batch, config.prediction_key),

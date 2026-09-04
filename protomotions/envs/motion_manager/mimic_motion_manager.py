@@ -25,6 +25,7 @@ class MimicMotionManager(MotionManager):
         device: torch.device,
         motion_lib: MotionLib,
         fixed_motion_ids_per_env: Optional[torch.Tensor] = None,
+        scene_ids_per_env: Optional[list[Optional[str]]] = None,
     ):
         """A motion manager that handles motion sampling and tracking for mimic environments.
 
@@ -36,6 +37,9 @@ class MimicMotionManager(MotionManager):
             motion_lib (MotionLib): Motion library containing reference motions
             fixed_motion_ids_per_env (Optional[torch.Tensor], optional): If provided, specifies fixed motion IDs to use for each environment. Defaults to None.
         """
+        # ``scene_ids_per_env`` is accepted for inference compatibility when a
+        # scene-aware checkpoint is switched to a simulator without scene support.
+        del scene_ids_per_env
         super().__init__(config, num_envs, env_dt, device, motion_lib, fixed_motion_ids_per_env)
 
     def get_done_tracks(self, env_ids: Optional[torch.Tensor] = None) -> torch.Tensor:

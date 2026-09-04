@@ -80,6 +80,16 @@ def create_parser():
         help="Evaluate fixed motions in smaller batches for stable PhysX comparisons.",
     )
     parser.add_argument(
+        "--eval-continue-after-failure",
+        action="store_true",
+        default=False,
+        help=(
+            "Keep threshold-failed motions active through the full clip so metric "
+            "means cover the complete horizon. First-failure success metrics are "
+            "still recorded."
+        ),
+    )
+    parser.add_argument(
         "--eval-action-ema-alpha",
         type=float,
         default=None,
@@ -253,6 +263,24 @@ def create_parser():
         help=(
             "Save the frozen target encoder's per-step packed FSQ tokens. "
             "Requires --oracle-target-tokens and a finite --record-steps run."
+        ),
+    )
+    parser.add_argument(
+        "--record-actions",
+        type=str,
+        default=None,
+        help=(
+            "Save policy outputs and post-action-processing joint targets for a "
+            "finite --record-steps rollout."
+        ),
+    )
+    parser.add_argument(
+        "--oracle-state-feedback",
+        action="store_true",
+        help=(
+            "Reset the simulated character to the current reference state before "
+            "each finite-rollout action. This is a decoder diagnostic, not a "
+            "deployable evaluation mode."
         ),
     )
     parser.add_argument(
@@ -832,6 +860,7 @@ def main():
         accelerator=accelerator,
         devices=1,
         num_nodes=1,
+        strategy="auto",
         loggers=[],  # No loggers needed for inference
         callbacks=[],  # No callbacks needed for inference
     )
@@ -928,6 +957,13 @@ def main():
         agent.evaluator.config.fixed_motion_eval_batch_size = (
             args.fixed_motion_eval_batch_size
         )
+    if args.eval_continue_after_failure:
+        if not hasattr(agent.evaluator.config, "deactivate_failed_motions"):
+            raise ValueError(
+                "--eval-continue-after-failure requires a Mimic evaluator"
+            )
+        agent.evaluator.config.deactivate_failed_motions = False
+        log.info("Inference evaluator: continuing clips after threshold failures")
     if args.eval_action_ema_alpha is not None:
         if not 0.0 < args.eval_action_ema_alpha <= 1.0:
             raise ValueError("--eval-action-ema-alpha must be in (0, 1]")
@@ -1006,6 +1042,14 @@ def main():
         if args.record_steps <= 0:
             raise ValueError("--record-target-tokens requires --record-steps > 0")
         agent.evaluator.target_token_record_path = args.record_target_tokens
+    if args.record_actions is not None:
+        if args.record_steps <= 0:
+            raise ValueError("--record-actions requires --record-steps > 0")
+        agent.evaluator.action_record_path = args.record_actions
+    if args.oracle_state_feedback:
+        if args.record_steps <= 0:
+            raise ValueError("--oracle-state-feedback requires --record-steps > 0")
+        agent.evaluator.oracle_state_feedback = True
     if args.record_student_oracle_tokens is not None:
         if args.oracle_target_tokens:
             raise ValueError(

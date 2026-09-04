@@ -82,6 +82,16 @@ class MimicEvaluatorConfig(EvaluatorConfig):
 
     _target_: str = "protomotions.agents.evaluators.mimic_evaluator.MimicEvaluator"
     fixed_motion_eval_batch_size: Optional[int] = None
+    deactivate_failed_motions: bool = field(
+        default=True,
+        metadata={
+            "help": (
+                "Stop and park a motion after its first evaluation-threshold "
+                "failure. Disable for full-horizon diagnostics while retaining "
+                "the first-failure success metric."
+            )
+        },
+    )
     save_predicted_motion_lib_every: Optional[int] = field(
         default=3,
         metadata={"help": "Save pred_motion_lib every M evals. None = disabled.", "min": 1}

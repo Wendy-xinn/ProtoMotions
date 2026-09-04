@@ -48,6 +48,26 @@ def test_discrete_latent_ppo_loss_matches_manual_ratio():
     assert torch.allclose(metrics["actor/entropy"], entropy.detach())
 
 
+def test_discrete_latent_ppo_loss_includes_continuous_residual_logprob():
+    logits = torch.zeros(2, 1, 2)
+    selected = torch.zeros(2, 1, dtype=torch.long)
+    categorical_logprob = torch.full((2,), -torch.log(torch.tensor(2.0)))
+    residual_logprob = torch.tensor([-0.2, -0.4])
+    old_neglogp = -(categorical_logprob + residual_logprob).unsqueeze(-1)
+
+    _, metrics = compute_discrete_latent_ppo_loss(
+        logits=logits,
+        selected=selected,
+        old_neglogp=old_neglogp,
+        advantages=torch.ones(2),
+        e_clip=0.2,
+        additional_logprob=residual_logprob,
+    )
+
+    assert torch.allclose(metrics["actor/ratio"], torch.ones(()))
+    assert torch.allclose(metrics["actor/kl"], torch.zeros(()))
+
+
 def test_discrete_latent_ppo_loss_recomputes_top_p_sampling_logprob():
     logits = torch.tensor([[[4.0, 3.0, 0.0]]])
     selected = torch.tensor([[0]])

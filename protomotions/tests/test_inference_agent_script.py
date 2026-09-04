@@ -18,10 +18,19 @@ INFERENCE_AGENT_PATH = str(Path(__file__).resolve().parents[1] / "inference_agen
 
 
 class _FakeFabricConfig:
-    def __init__(self, accelerator="gpu", devices=1, num_nodes=1, loggers=None, callbacks=None):
+    def __init__(
+        self,
+        accelerator="gpu",
+        devices=1,
+        num_nodes=1,
+        strategy="auto",
+        loggers=None,
+        callbacks=None,
+    ):
         self.accelerator = accelerator
         self.devices = devices
         self.num_nodes = num_nodes
+        self.strategy = strategy
         self.loggers = loggers or []
         self.callbacks = callbacks or []
 
@@ -30,6 +39,7 @@ class _FakeFabricConfig:
             "accelerator": self.accelerator,
             "devices": self.devices,
             "num_nodes": self.num_nodes,
+            "strategy": self.strategy,
             "loggers": self.loggers,
             "callbacks": self.callbacks,
         }
@@ -588,6 +598,7 @@ def test_inference_main_full_eval_switches_simulator_and_applies_cli_overrides(
     assert "EVALUATION RESULTS" in output
     assert "Overall Score: 3.750000" in output
     assert _FakeFabric.instances[0].kwargs["accelerator"] == "gpu"
+    assert _FakeFabric.instances[0].kwargs["strategy"] == "auto"
     assert configs["simulator"].num_envs == 1
     build_call = next(call for call in calls if call[0] == "build_components")
     assert build_call[1]["simulator_config"].num_envs == 3

@@ -36,6 +36,12 @@ def additional_experiment_arguments(parser):
         help="Penalty weight for processed-action second differences.",
     )
     parser.add_argument(
+        "--rlft-body-linear-jerk-weight",
+        type=float,
+        default=0.0,
+        help="Penalty weight for actual rigid-body linear jerk.",
+    )
+    parser.add_argument(
         "--rlft-tracking-threshold-bonus-weight",
         type=float,
         default=0.25,
@@ -61,6 +67,29 @@ def additional_experiment_arguments(parser):
     parser.add_argument("--rlft-root-orientation-weight", type=float, default=0.10)
     parser.add_argument("--rlft-parameter-ema-decay", type=float, default=None)
     parser.add_argument(
+        "--rlft-action-residual-max-delta",
+        type=float,
+        default=0.0,
+        help=(
+            "Maximum normalized action correction after FSQ decoding. Set to 0 "
+            "to retain token-only RLFT."
+        ),
+    )
+    parser.add_argument(
+        "--rlft-action-residual-logstd",
+        type=float,
+        default=-3.5,
+        help="Initial exploration log standard deviation for the action residual.",
+    )
+    parser.add_argument(
+        "--rlft-oracle-target-tokens",
+        action="store_true",
+        help=(
+            "Bypass the student token policy, encode full GT target poses, and "
+            "train only the continuous action residual."
+        ),
+    )
+    parser.add_argument(
         "--rlft-early-termination",
         action="store_true",
         help=(
@@ -75,6 +104,7 @@ def env_config(robot_cfg, args):
         anchor_pos_error_term_factory,
         action_acceleration_factory,
         action_smoothness_factory,
+        body_linear_jerk_factory,
         global_anchor_ori_rew_factory,
         global_anchor_pos_rew_factory,
         global_body_ang_vel_rew_factory,
@@ -82,6 +112,7 @@ def env_config(robot_cfg, args):
         gr_error_factory,
         gt_error_factory,
         max_joint_error_factory,
+        previous_actions_factory,
         relative_body_ori_rew_factory,
         relative_body_pos_error_term_factory,
         relative_body_pos_rew_factory,
@@ -90,6 +121,10 @@ def env_config(robot_cfg, args):
     )
 
     config = sft.env_config(robot_cfg, args)
+    config.observation_components["previous_actions"] = previous_actions_factory(
+        history_steps=1,
+        processed=False,
+    )
     body_names = robot_cfg.kinematic_info.body_names
 
     def body_ids(names):
@@ -127,6 +162,11 @@ def env_config(robot_cfg, args):
         ):
             acceleration_weights[index] = 1.5
     acceleration_weights /= acceleration_weights.mean()
+    body_jerk_weights = torch.ones(len(body_names), dtype=torch.float)
+    for index, name in enumerate(body_names):
+        if name in {"Head", "Chest"}:
+            body_jerk_weights[index] = 1.5
+    body_jerk_weights /= body_jerk_weights.mean()
 
     # Separate global root tracking from root-relative pose tracking. Dedicated
     # end-effector and Head/Chest terms prevent a few bad bodies from being
@@ -158,6 +198,10 @@ def env_config(robot_cfg, args):
         "action_acceleration": action_acceleration_factory(
             weight=args.rlft_action_acceleration_weight,
             joint_weights=acceleration_weights,
+        ),
+        "body_linear_jerk": body_linear_jerk_factory(
+            weight=args.rlft_body_linear_jerk_weight,
+            body_weights=body_jerk_weights,
         ),
         "tracking_threshold_bonus": tracking_threshold_bonus_factory(
             weight=args.rlft_tracking_threshold_bonus_weight,
@@ -202,6 +246,7 @@ def agent_config(robot_config, env_config, args):
         DiscretePriorPEFTConfig,
         DiscretePriorPEFTRLFTAgentConfig,
         DiscretePriorPEFTRLFTModelConfig,
+        GaussianActionResidualConfig,
     )
     from protomotions.envs.component_factories import (
         gr_error_factory,
@@ -237,6 +282,16 @@ def agent_config(robot_config, env_config, args):
         model=DiscretePriorPEFTRLFTModelConfig(
             actor=DiscretePriorPEFTActorConfig(
                 in_keys=SCENE_KEYS,
+                oracle_target_tokens=args.rlft_oracle_target_tokens,
+                action_residual=GaussianActionResidualConfig(
+                    enabled=args.rlft_action_residual_max_delta > 0.0,
+                    action_dim=robot_config.number_of_actions,
+                    hidden_dim=256,
+                    max_delta=max(args.rlft_action_residual_max_delta, 1e-6),
+                    initial_logstd=args.rlft_action_residual_logstd,
+                    state_key="max_coords_obs",
+                    previous_action_key="previous_actions",
+                ),
                 peft=DiscretePriorPEFTConfig(
                     model=condition_model,
                     peft_type="dora",

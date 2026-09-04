@@ -158,6 +158,8 @@ class DiscretePriorPEFTRLFTAgent(DiscretePriorPEFTSetupMixin, FineTuningAgent):
         not silently rebuilt from a changed student or configured prior.
         """
         actor = self.model._actor
+        if getattr(actor, "oracle_target_tokens", False):
+            return
         if require_existing:
             actor.require_reference()
             return
@@ -172,12 +174,16 @@ class DiscretePriorPEFTRLFTAgent(DiscretePriorPEFTSetupMixin, FineTuningAgent):
         # adapter updates near the frozen prior's scale instead of letting a few
         # large magnitudes dominate the token logits.
         bound = getattr(self.config.model.actor.peft, "m_clamp", None)
-        if bound is None:
-            return
-        peft = self.model._actor.prior_with_peft
-        for module in peft.base_prior._transformer.modules():
-            if hasattr(module, "m"):
-                module.m.clamp_(-bound, bound)
+        if bound is not None:
+            peft = self.model._actor.prior_with_peft
+            for module in peft.base_prior._transformer.modules():
+                if hasattr(module, "m"):
+                    module.m.clamp_(-bound, bound)
+        residual_logstd = getattr(
+            self.model._actor, "action_residual_logstd", None
+        )
+        if residual_logstd is not None:
+            residual_logstd.clamp_(-5.0, -2.0)
 
     def actor_step(self, batch_dict: Dict) -> Tuple[Tensor, Dict]:
         return self._actor_step_discrete_ppo(batch_dict)
@@ -189,6 +195,14 @@ class DiscretePriorPEFTRLFTAgent(DiscretePriorPEFTSetupMixin, FineTuningAgent):
         old_neglogp = batch_dict["neglogp"].detach()
         advantages = batch_dict["advantages"].detach()
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+        if getattr(actor, "oracle_target_tokens", False):
+            return self._actor_step_oracle_residual(
+                batch_dict,
+                prior_tokens,
+                old_neglogp,
+                advantages,
+            )
 
         # PPO is applied in token space: rollout sampled GPC prior tokens from
         # the adapter, then optimization replays those exact tokens under
@@ -212,6 +226,13 @@ class DiscretePriorPEFTRLFTAgent(DiscretePriorPEFTSetupMixin, FineTuningAgent):
             base_prior_logits = base_forward(prior_dict)
             loss_top_p = prior_with_peft.prior_top_p
 
+        residual_logprob_fn = getattr(actor, "action_residual_logprob", None)
+        residual_logprob = (
+            residual_logprob_fn(batch_dict, prior_tokens)
+            if residual_logprob_fn is not None
+            else None
+        )
+
         ppo_loss, ppo_log_dict = compute_discrete_latent_ppo_loss(
             logits=logits,
             selected=prior_tokens,
@@ -222,6 +243,7 @@ class DiscretePriorPEFTRLFTAgent(DiscretePriorPEFTSetupMixin, FineTuningAgent):
             temperature=loss_temperature,
             top_p=loss_top_p,
             prior_logits=base_prior_logits,
+            additional_logprob=residual_logprob,
             log_prefix="actor",
         )
 
@@ -265,8 +287,68 @@ class DiscretePriorPEFTRLFTAgent(DiscretePriorPEFTSetupMixin, FineTuningAgent):
             "losses/actor_loss": loss.detach(),
             "stats/reward_mean": batch_dict["rewards"].mean().detach(),
         }
+        if residual_logprob is not None:
+            residual = batch_dict["action_residual"]
+            log_dict.update(
+                {
+                    "actor/residual_rms": residual.square().mean().sqrt().detach(),
+                    "actor/residual_logstd_mean": (
+                        actor.action_residual_logstd.mean().detach()
+                    ),
+                }
+            )
         log_dict.update(ppo_log_dict)
         return loss, log_dict
+
+    def _actor_step_oracle_residual(
+        self,
+        batch_dict: Dict,
+        prior_tokens: Tensor,
+        old_neglogp: Tensor,
+        advantages: Tensor,
+    ) -> Tuple[Tensor, Dict]:
+        """PPO update for a continuous residual under fixed oracle FSQ tokens."""
+        actor = self.model._actor
+        distribution = actor.action_residual_distribution(batch_dict, prior_tokens)
+        if distribution is None:
+            raise RuntimeError("Oracle-token RLFT requires an action residual policy")
+        residual = batch_dict["action_residual"].detach()
+        logprob = distribution.log_prob(residual).sum(dim=-1)
+        old_logprob = -old_neglogp.sum(dim=-1)
+        log_ratio = (logprob - old_logprob).clamp(min=-20.0, max=20.0)
+        ratio = log_ratio.exp()
+        unclipped = advantages * ratio
+        clipped = advantages * ratio.clamp(1.0 - self.e_clip, 1.0 + self.e_clip)
+        ppo_loss = -torch.min(unclipped, clipped).mean()
+        entropy = distribution.entropy().sum(dim=-1).mean()
+        loss = ppo_loss - self.config.entropy_coef * entropy
+
+        with torch.no_grad():
+            kl = (old_logprob - logprob).mean()
+            clip_frac = (torch.abs(ratio - 1.0) > self.e_clip).float().mean()
+
+        return loss, {
+            "actor/ppo_loss": ppo_loss.detach(),
+            "actor/entropy": entropy.detach(),
+            "actor/ratio": ratio.mean().detach(),
+            "actor/clip_frac": clip_frac.detach(),
+            "actor/kl": kl.detach(),
+            "actor/loss": loss.detach(),
+            "actor/kl_prior_loss": torch.zeros((), device=loss.device),
+            "actor/kl_sft_reference_loss": torch.zeros((), device=loss.device),
+            "actor/kl_coeff": 0.0,
+            "actor/adv_mean": advantages.mean().detach(),
+            "actor/adv_std": advantages.std().detach(),
+            "actor/residual_rms": residual.square().mean().sqrt().detach(),
+            "actor/residual_mean_rms": (
+                distribution.mean.square().mean().sqrt().detach()
+            ),
+            "actor/residual_logstd_mean": (
+                actor.action_residual_logstd.mean().detach()
+            ),
+            "losses/actor_loss": loss.detach(),
+            "stats/reward_mean": batch_dict["rewards"].mean().detach(),
+        }
 
     def critic_step(self, batch_dict: Dict) -> Tuple[Tensor, Dict]:
         """Critic MSE loss against computed returns."""

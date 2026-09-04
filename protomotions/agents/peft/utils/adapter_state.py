@@ -37,6 +37,10 @@ def is_adapter_state_key(key: str) -> bool:
         return False
     if key.startswith("actor_peft_model."):
         return True
+    if key.startswith("action_residual_model."):
+        return True
+    if key == "action_residual_logstd":
+        return True
     if key.startswith("prior_with_peft.film_input_norm."):
         return True
     return key.startswith("prior_with_peft.") and (

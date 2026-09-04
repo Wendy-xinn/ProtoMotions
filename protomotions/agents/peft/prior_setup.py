@@ -97,9 +97,11 @@ class DiscretePriorPEFTSetupMixin:
         )
 
     def _should_build_target_encoder(self, mimic_target_poses_dim: int) -> bool:
-        # RLFT never encodes target poses into supervision tokens. SFT overrides
-        # this because its expert labels come from the frozen target encoder.
-        return False
+        # Normal RLFT predicts tokens. The oracle-residual diagnostic and SFT
+        # explicitly request the frozen target encoder.
+        return bool(
+            getattr(self.config.model.actor, "oracle_target_tokens", False)
+        )
 
     def create_model(self):
         expected_keys = self._validate_peft_inputs()

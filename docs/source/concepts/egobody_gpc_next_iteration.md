@@ -110,6 +110,28 @@ warm-start from the SFT checkpoint, while an RLFT resume must use a complete
 RLFT training checkpoint and must never reconstruct the reference from the
 already-updated student.
 
+## FSQ action residual
+
+The 50-clip oracle-token diagnostic separates target quality from student-token
+accuracy. On motion 10, the mean second difference of the retargeted GT joint
+trajectory is 0.18, while the frozen FSQ decoder's PD target is 2.56.
+About 15.8% of adjacent decoder targets are exactly repeated, followed by large
+changes when the discrete code switches. The simulated joint trajectory is much
+smoother (0.041), so physics filters this discontinuity rather than creating it.
+The remaining Head error is distributed across Chest, Neck1, Neck2, and Head;
+overwriting only the Head target improves orientation but worsens body tracking
+and jerk.
+
+RLFT therefore supports an optional bounded Gaussian action residual after the frozen FSQ
+decoder. It reads only the current body state, decoded base action, and previous
+final action; scene information remains confined to the later token-prediction
+stage. Its zero-initialized mean is limited to 0.12 in normalized action space,
+and its log-probability is combined with the categorical token log-probability
+in the PPO ratio. The frozen prior/decoder and SFT KL anchor remain unchanged.
+Set `GPC_RLFT_ACTION_RESIDUAL_MAX_DELTA=0` for the token-only ablation.
+It remains disabled by default until an oracle-token, scene-input-free calibration
+demonstrates better tracking and jerk on the 50-clip set.
+
 ## Validation and throughput
 
 Build the frame-aligned causal scene maps once, then validate the complete

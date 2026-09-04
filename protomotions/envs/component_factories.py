@@ -1054,6 +1054,23 @@ def action_acceleration_factory(
     )
 
 
+def body_linear_jerk_factory(
+    weight: float = -0.02,
+    body_weights: torch.Tensor = None,
+) -> MdpComponent:
+    """Factory for actual rigid-body linear jerk regularization."""
+    from protomotions.envs.rewards import compute_body_linear_jerk
+
+    return MdpComponent(
+        compute_func=compute_body_linear_jerk,
+        dynamic_vars={
+            "current_body_vel": EnvContext.current.rigid_body_vel,
+            "historical_body_vel": EnvContext.historical.rigid_body_vel,
+        },
+        static_params={"weight": weight, "body_weights": body_weights},
+    )
+
+
 def tracking_threshold_bonus_factory(
     weight: float = 0.25,
     position_threshold: float = 0.35,
@@ -2178,6 +2195,7 @@ __all__ = [
     # Reward factories
     "action_smoothness_factory",
     "action_acceleration_factory",
+    "body_linear_jerk_factory",
     "tracking_threshold_bonus_factory",
     "tracking_threshold_violation_factory",
     "gt_rew_factory",

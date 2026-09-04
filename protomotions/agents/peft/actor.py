@@ -59,6 +59,9 @@ class DiscretePriorPEFTActor(nn.Module):
     ):
         super().__init__()
         peft_cfg = config.peft
+        self.oracle_target_tokens = bool(
+            getattr(config, "oracle_target_tokens", False)
+        )
         self.out_keys = list(config.out_keys)
 
         latent_decoder = require_frozen_prior_attr(
@@ -134,6 +137,14 @@ class DiscretePriorPEFTActor(nn.Module):
             freeze_module(self.target_latent_encoder)
         else:
             self.target_latent_encoder = None
+        if self.oracle_target_tokens:
+            if self.target_latent_encoder is None:
+                raise RuntimeError(
+                    "Oracle-token RLFT requires the frozen target encoder."
+                )
+            for key in self.target_latent_encoder.encoder.in_keys:
+                if key not in self.in_keys:
+                    self.in_keys.append(key)
 
         # Frozen prior transformer, wrapped with PEFT adapters below.
         freeze_module(prior_transformer)
@@ -166,9 +177,55 @@ class DiscretePriorPEFTActor(nn.Module):
         )
         self.kl_coeff = peft_cfg.kl_coeff
 
+        residual_cfg = getattr(config, "action_residual", None)
+        self.action_residual_max_delta = float(
+            getattr(residual_cfg, "max_delta", 0.0)
+        )
+        self.action_residual_model = None
+        self.action_residual_logstd = None
+        self.action_residual_state_key = None
+        self.action_residual_previous_action_key = None
+        if residual_cfg is not None and residual_cfg.enabled:
+            self.action_residual_state_key = residual_cfg.state_key
+            if self.action_residual_state_key not in self.in_keys:
+                self.in_keys.append(self.action_residual_state_key)
+            self.action_residual_previous_action_key = (
+                residual_cfg.previous_action_key
+            )
+            if (
+                self.action_residual_previous_action_key is not None
+                and self.action_residual_previous_action_key not in self.in_keys
+            ):
+                self.in_keys.append(self.action_residual_previous_action_key)
+            self.action_residual_model = nn.Sequential(
+                nn.LazyLinear(residual_cfg.hidden_dim),
+                nn.SiLU(),
+                nn.Linear(residual_cfg.hidden_dim, residual_cfg.hidden_dim),
+                nn.SiLU(),
+                nn.Linear(residual_cfg.hidden_dim, residual_cfg.action_dim),
+            )
+            nn.init.zeros_(self.action_residual_model[-1].weight)
+            nn.init.zeros_(self.action_residual_model[-1].bias)
+            self.action_residual_logstd = nn.Parameter(
+                torch.full((residual_cfg.action_dim,), residual_cfg.initial_logstd)
+            )
+            self.out_keys = list(
+                dict.fromkeys(
+                    [*self.out_keys, "action_residual", "mean_action_residual"]
+                )
+            )
+        if self.oracle_target_tokens:
+            freeze_module(self.actor_peft_model)
+            freeze_module(self.prior_with_peft)
+
     def optional_full_checkpoint_state_prefixes(self) -> tuple[str, ...]:
         """Frozen target encoder state is present only for SFT/checkpointing flows."""
-        return ("target_latent_encoder.", "reference_actor_peft_model.")
+        return (
+            "target_latent_encoder.",
+            "reference_actor_peft_model.",
+            "action_residual_model.",
+            "action_residual_logstd",
+        )
 
     def adapter_state_dict(self) -> dict[str, torch.Tensor]:
         """Return only PEFT adapter weights, excluding the frozen prior."""
@@ -377,6 +434,36 @@ class DiscretePriorPEFTActor(nn.Module):
         key = decoder.out_keys[0] if hasattr(decoder, "out_keys") else "mu"
         return td[key]
 
+    def _action_residual_distribution(self, tensordict, base_action):
+        if self.action_residual_model is None:
+            return None
+        features = [tensordict[self.action_residual_state_key], base_action.detach()]
+        if self.action_residual_previous_action_key is not None:
+            features.append(tensordict[self.action_residual_previous_action_key])
+        features = torch.cat(features, dim=-1)
+        mean = self.action_residual_max_delta * torch.tanh(
+            self.action_residual_model(features)
+        )
+        std = self.action_residual_logstd.exp().expand_as(mean)
+        return torch.distributions.Normal(mean, std)
+
+    def action_residual_distribution(self, tensordict, prior_tokens):
+        """Build the residual policy conditioned on the selected FSQ tokens."""
+        if self.action_residual_model is None:
+            return None
+        tensordict = self._to_tensordict(tensordict)
+        fsq_indices = self.prior_tokens_to_fsq_indices(prior_tokens)
+        fsq_codes = self.fsq_indices_to_codes(fsq_indices)
+        base_action = self._decode(tensordict, fsq_codes)
+        return self._action_residual_distribution(tensordict, base_action)
+
+    def action_residual_logprob(self, tensordict, prior_tokens):
+        """Re-evaluate a rollout residual under the current residual policy."""
+        distribution = self.action_residual_distribution(tensordict, prior_tokens)
+        if distribution is None:
+            return None
+        return distribution.log_prob(tensordict["action_residual"]).sum(dim=-1)
+
     def predict_target_prior_tokens(self, tensordict):
         """Encode target poses to GPC prior tokens for SFT."""
         with torch.no_grad():
@@ -467,32 +554,57 @@ class DiscretePriorPEFTActor(nn.Module):
 
     def get_action_and_logp(self, tensordict):
         """Rollout step: generate action + per-token log-probs for PPO."""
-        if (
+        if self.oracle_target_tokens:
+            prior_dict = None
+            prior_tokens = self.predict_target_prior_tokens(tensordict)
+            logprob = torch.zeros_like(prior_tokens, dtype=torch.float)
+        elif (
             self.prior_with_peft.sampling_mode == "prior_constraint"
             and not self.reference_ready
         ):
             self.capture_reference()
-        prior_dict = self.build_prior_input(tensordict)
-        reference_prior_dict = (
-            self.build_reference_prior_input(tensordict)
-            if self.prior_with_peft.sampling_mode == "prior_constraint"
-            else None
-        )
-        prior_tokens, logprob = self.prior_with_peft.generate(
-            prior_dict,
-            reference_input_dict=reference_prior_dict,
-            return_logits=False,
-            return_logprob=True,
-        )
+        if not self.oracle_target_tokens:
+            prior_dict = self.build_prior_input(tensordict)
+            reference_prior_dict = (
+                self.build_reference_prior_input(tensordict)
+                if self.prior_with_peft.sampling_mode == "prior_constraint"
+                else None
+            )
+            prior_tokens, logprob = self.prior_with_peft.generate(
+                prior_dict,
+                reference_input_dict=reference_prior_dict,
+                return_logits=False,
+                return_logprob=True,
+            )
 
         neglogp = -logprob
 
         fsq_indices = self.prior_tokens_to_fsq_indices(prior_tokens)
         fsq_codes = self.fsq_indices_to_codes(fsq_indices)
-        action = self._decode(tensordict, fsq_codes)
+        base_action = self._decode(tensordict, fsq_codes)
+        action = base_action
+        mean_action = base_action
+        if self.action_residual_model is not None:
+            distribution = self._action_residual_distribution(
+                tensordict, base_action
+            )
+            # Rollout collection intentionally keeps the model in eval mode so
+            # observation normalizers stay frozen. Match the standard PPO actor:
+            # always sample ``action`` and expose ``mean_action`` for evaluators.
+            residual = distribution.sample()
+            residual_logprob = distribution.log_prob(residual).sum(dim=-1)
+            action = base_action + residual
+            mean_action = base_action + distribution.mean
+            neglogp = neglogp.clone()
+            if neglogp.ndim == 1:
+                neglogp = neglogp - residual_logprob
+            else:
+                neglogp[..., 0] = neglogp[..., 0] - residual_logprob
+            tensordict["action_residual"] = residual
+            tensordict["mean_action_residual"] = distribution.mean
 
         tensordict["action"] = action
-        tensordict["mean_action"] = action
+        tensordict["mean_action"] = mean_action
         tensordict["neglogp"] = neglogp
         tensordict["prior_tokens"] = prior_tokens
         tensordict[LATENT_KEY] = prior_tokens

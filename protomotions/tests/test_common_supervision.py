@@ -39,6 +39,32 @@ def test_discrete_supervision_loss_uses_cross_entropy_and_reports_accuracy():
 
     assert torch.allclose(loss, expected)
     assert torch.allclose(metrics["supervision/accuracy"], torch.tensor(1.0))
+    assert torch.allclose(
+        metrics["supervision/all_positions_accuracy"], torch.tensor(1.0)
+    )
+
+
+def test_discrete_supervision_distinguishes_token_and_sequence_accuracy():
+    logits = torch.tensor(
+        [
+            [[4.0, 0.0], [4.0, 0.0]],
+            [[4.0, 0.0], [4.0, 0.0]],
+        ]
+    )
+    target = torch.tensor([[0, 0], [0, 1]])
+    batch = {LATENT_LOGITS_KEY: logits, "target_latent": target}
+    config = SupervisionLossConfig(
+        loss_type=SupervisionLossType.DISCRETE_CROSS_ENTROPY,
+        prediction_key=LATENT_LOGITS_KEY,
+        target_key="target_latent",
+    )
+
+    _, metrics = compute_supervision_loss(batch, config)
+
+    assert torch.allclose(metrics["supervision/accuracy"], torch.tensor(0.75))
+    assert torch.allclose(
+        metrics["supervision/all_positions_accuracy"], torch.tensor(0.5)
+    )
 
 
 def test_continuous_distribution_supervision_uses_gaussian_kl():

@@ -74,6 +74,31 @@ def compute_action_acceleration(
     return torch.linalg.vector_norm(acceleration, dim=-1)
 
 
+def compute_body_linear_jerk(
+    current_body_vel: Tensor,
+    historical_body_vel: Tensor,
+    body_weights: Optional[Tensor] = None,
+) -> Tensor:
+    """Mean body-speed second difference, proportional to position jerk.
+
+    ``historical_body_vel[:, 0]`` and ``[:, 1]`` are the states at ``t-1``
+    and ``t-2``. We intentionally leave out the constant ``dt**-2`` factor so
+    reward weights remain numerically well-conditioned at a fixed control rate.
+    """
+    if historical_body_vel.shape[1] < 2:
+        raise ValueError("Body jerk reward requires at least two history steps")
+    jerk = (
+        current_body_vel
+        - 2.0 * historical_body_vel[:, 0]
+        + historical_body_vel[:, 1]
+    )
+    per_body = torch.linalg.vector_norm(jerk, dim=-1)
+    if body_weights is not None:
+        weights = body_weights.to(device=per_body.device, dtype=per_body.dtype)
+        per_body = per_body * weights
+    return per_body.mean(dim=-1)
+
+
 def compute_action_smoothness_logmeanexp(
     current_processed_action: Tensor,
     previous_processed_action: Tensor,

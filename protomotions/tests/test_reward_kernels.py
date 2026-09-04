@@ -5,6 +5,7 @@
 
 import math
 
+import pytest
 import torch
 
 from protomotions.envs.rewards import base, regularization, task, tracking
@@ -249,6 +250,23 @@ def test_regularization_rewards_and_helpers():
         ),
         torch.tensor([4.25**0.5, 20.0**0.5]),
     )
+    current_body_vel = torch.tensor([[[3.0, 0.0, 0.0], [0.0, 4.0, 0.0]]])
+    historical_body_vel = torch.tensor(
+        [[[[1.0, 0.0, 0.0], [0.0, 2.0, 0.0]],
+          [[0.0, 0.0, 0.0], [0.0, 1.0, 0.0]]]]
+    )
+    assert torch.allclose(
+        regularization.compute_body_linear_jerk(
+            current_body_vel,
+            historical_body_vel,
+            body_weights=torch.tensor([2.0, 0.5]),
+        ),
+        torch.tensor([1.25]),
+    )
+    with pytest.raises(ValueError, match="at least two history steps"):
+        regularization.compute_body_linear_jerk(
+            current_body_vel, historical_body_vel[:, :1]
+        )
     assert torch.allclose(
         regularization.compute_action_smoothness_logmeanexp(
             current_action,

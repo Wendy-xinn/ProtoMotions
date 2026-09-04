@@ -75,6 +75,12 @@ def main() -> None:
     parser.add_argument("--width", type=int, default=1600)
     parser.add_argument("--height", type=int, default=900)
     parser.add_argument("--fps", type=int, default=None)
+    parser.add_argument(
+        "--view",
+        choices=("full", "upper"),
+        default="full",
+        help="Humanoid framing used for every comparison panel.",
+    )
     args = parser.parse_args()
 
     reference = load_motion(args.reference)
@@ -136,7 +142,7 @@ def main() -> None:
                     frame_id,
                     basis,
                     (panel_width, panel_height),
-                    "full",
+                    args.view,
                 )
                 canvas[
                     header_height : header_height + panel_height,

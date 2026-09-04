@@ -66,6 +66,7 @@ from protomotions.envs.rewards.task import (
 from protomotions.envs.rewards.regularization import (
     compute_action_smoothness,
     compute_action_acceleration,
+    compute_body_linear_jerk,
     compute_action_smoothness_logmeanexp,
     compute_pow_rew,
     compute_soft_pos_limit_rew,
@@ -119,6 +120,7 @@ __all__ = [
     # Regularization reward kernels
     "compute_action_smoothness",
     "compute_action_acceleration",
+    "compute_body_linear_jerk",
     "compute_action_smoothness_logmeanexp",
     "compute_pow_rew",
     "compute_soft_pos_limit_rew",

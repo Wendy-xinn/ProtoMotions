@@ -38,6 +38,7 @@ def compute_discrete_latent_ppo_loss(
     temperature: float = 1.0,
     top_p: float = 1.0,
     prior_logits: torch.Tensor = None,
+    additional_logprob: torch.Tensor = None,
     log_prefix: str = "actor",
 ):
     """Compute PPO loss under the same distribution used during token rollout."""
@@ -71,6 +72,8 @@ def compute_discrete_latent_ppo_loss(
     )
 
     logprob_sum = logprob.sum(dim=-1)
+    if additional_logprob is not None:
+        logprob_sum = logprob_sum + additional_logprob
     old_logprob_sum = old_logprob.sum(dim=-1)
     log_ratio = (logprob_sum - old_logprob_sum).clamp(min=-20.0, max=20.0)
     ratio = torch.exp(log_ratio)

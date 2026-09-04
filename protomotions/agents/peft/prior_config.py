@@ -47,6 +47,19 @@ DEFAULT_PEFT_CONDITION_KEY = "task_cond"
 DEFAULT_PEFT_NORM_CLAMP_VALUE = 5.0
 
 
+@dataclass
+class GaussianActionResidualConfig:
+    """Small stochastic correction applied after the frozen FSQ decoder."""
+
+    enabled: bool = False
+    action_dim: int = 0
+    hidden_dim: int = 256
+    max_delta: float = 0.15
+    initial_logstd: float = -3.5
+    state_key: str = "max_coords_obs"
+    previous_action_key: Optional[str] = None
+
+
 def default_peft_model_config(
     in_keys: List[str],
     condition_key: str = DEFAULT_PEFT_CONDITION_KEY,
@@ -204,9 +217,22 @@ class DiscretePriorPEFTActorConfig:
         metadata={"help": "Actor rollout output keys."},
     )
     peft: DiscretePriorPEFTConfig = field(default_factory=DiscretePriorPEFTConfig)
+    action_residual: GaussianActionResidualConfig = field(
+        default_factory=GaussianActionResidualConfig
+    )
+    oracle_target_tokens: bool = False
 
     def __post_init__(self):
         self.peft.resolve_model(self.in_keys)
+        if self.action_residual.enabled:
+            if self.action_residual.action_dim < 1:
+                raise ValueError("Enabled action residual requires action_dim > 0")
+            if self.action_residual.hidden_dim < 1:
+                raise ValueError("Action residual hidden_dim must be positive")
+            if not 0.0 < self.action_residual.max_delta <= 1.0:
+                raise ValueError("Action residual max_delta must be in (0, 1]")
+        if self.oracle_target_tokens and not self.action_residual.enabled:
+            raise ValueError("Oracle-token RLFT requires an enabled action residual")
 
 
 @dataclass

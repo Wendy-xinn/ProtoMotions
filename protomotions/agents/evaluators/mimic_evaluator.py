@@ -306,7 +306,9 @@ class MimicEvaluator(BaseEvaluator):
             if terminated_active.any() and self._motion_failed is not None:
                 self._motion_failed[active_motion_ids[terminated_active]] = True
                 failed = self._motion_failed[active_motion_ids]
-            deactivate = failed | terminated_active
+            deactivate = terminated_active
+            if self.config.deactivate_failed_motions:
+                deactivate = deactivate | failed
             if deactivate.any():
                 failed_env_ids = active_env_ids[deactivate]
                 active_indices = torch.nonzero(active, as_tuple=False).flatten()
